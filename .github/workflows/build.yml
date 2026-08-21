@@ -37,7 +37,7 @@ jobs:
                 git remote add origin https://github.com/Rinnegatamante/vitaGL
                 git fetch --depth=1 origin e8f01bf52df3d85a111fdb3d51113a4df085c43f
                 git checkout --detach FETCH_HEAD
-                make PRIMITIVES_SPEEDHACK=0 USE_SCRATCH_MEMORY=1 HAVE_CUSTOM_HEAP=1 HAVE_PTHREAD=1 HAVE_VITA3K_SUPPORT=1 LOG_ERRORS=1 install -j$(nproc)
+                make PRIMITIVES_SPEEDHACK=0 USE_SCRATCH_MEMORY=1 HAVE_CUSTOM_HEAP=1 HAVE_PTHREAD=1 HAVE_VITA3K_SUPPORT=1 NO_SPLASHSCREEN=1 LOG_ERRORS=1 install -j$(nproc)
      
             - name: Build
               run: ./build_psp2.sh
