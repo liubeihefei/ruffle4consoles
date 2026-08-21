@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 sdl2 = { version = "0.38.0", features = ["static-link", "use-pkgconfig"] }
-ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", branch = "master", features = [
+ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d", features = [
     "audio",
     "symphonia",
     "mp3",
@@ -15,10 +15,10 @@ ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", branch = "master", 
     "default_compatibility_rules",
     "default_font",
 ] }
-ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", branch = "master" }
+ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d" }
 ruffle_render_glow = { path = "ruffle_render_glow" }
 anyhow = "1.0"
-glow = { git = "https://github.com/grovesNL/glow", branch = "main", features = []}
+glow = { git = "https://github.com/grovesNL/glow", rev = "aa4238a60d17076b917eaa1ec662e5080df42b0a", features = []}
 ron = "0.11.0"
 serde = "1.0.225"
 tracing = { version = "0.1.43", features = ["log"] }
