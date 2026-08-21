@@ -14,20 +14,30 @@ jobs:
             - name: Install Java and Northfear SDL
               run: |
                 apk add --no-cache openjdk11 cmake samurai
-                git clone --depth=1 https://github.com/Northfear/SDL/ && cd SDL
+                git init SDL
+                cd SDL
+                git remote add origin https://github.com/Northfear/SDL/
+                git fetch --depth=1 origin f99bb638f7eb256fa812e9da15d4e295a170640c
+                git checkout --detach FETCH_HEAD
                 cmake -S. -Bbuild -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_TOOLCHAIN_FILE=${VITASDK}/share/vita.toolchain.cmake -DCMAKE_BUILD_TYPE=Release -DVIDEO_VITA_VGL=ON -G Ninja
                 cmake --build build --parallel $(nproc)
                 cmake --install build
                 
             - name: Install vitaGL
               run: |
-                git clone --depth=1 https://github.com/Rinnegatamante/vitaShaRK
-                cd vitaShaRK 
+                git init vitaShaRK
+                cd vitaShaRK
+                git remote add origin https://github.com/Rinnegatamante/vitaShaRK
+                git fetch --depth=1 origin 807cfc66b6f1ed438f4c68d0aac1262b4e5ace8a
+                git checkout --detach FETCH_HEAD
                 make install -j$(nproc)
                 cd ..
-                git clone --depth=1 https://github.com/Rinnegatamante/vitaGL
+                git init vitaGL
                 cd vitaGL
-                make PRIMITIVES_SPEEDHACK=0 USE_SCRATCH_MEMORY=1 HAVE_CUSTOM_HEAP=1 HAVE_PTHREAD=1 LOG_ERRORS=1 install -j$(nproc)
+                git remote add origin https://github.com/Rinnegatamante/vitaGL
+                git fetch --depth=1 origin e8f01bf52df3d85a111fdb3d51113a4df085c43f
+                git checkout --detach FETCH_HEAD
+                make PRIMITIVES_SPEEDHACK=0 USE_SCRATCH_MEMORY=1 HAVE_CUSTOM_HEAP=1 HAVE_PTHREAD=1 HAVE_VITA3K_SUPPORT=1 LOG_ERRORS=1 install -j$(nproc)
      
             - name: Build
               run: ./build_psp2.sh
