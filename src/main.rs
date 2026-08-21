@@ -38,15 +38,6 @@ use backends::ui::SdlUiBackend;
 use core::ffi::c_void;
 
 #[cfg(target_os = "vita")]
-type SceGxmMultisampleMode = u32;
-#[cfg(target_os = "vita")]
-pub const SCE_GXM_MULTISAMPLE_NONE: SceGxmMultisampleMode = 0;
-#[cfg(target_os = "vita")]
-pub const SCE_GXM_MULTISAMPLE_2X: SceGxmMultisampleMode = 1;
-#[cfg(target_os = "vita")]
-pub const SCE_GXM_MULTISAMPLE_4X: SceGxmMultisampleMode = 2;
-
-#[cfg(target_os = "vita")]
 static VGL_MODE_POSTPONED: u32 = 2;
 
 #[cfg(target_os = "vita")]
@@ -61,16 +52,6 @@ static VGL_MODE_POSTPONED: u32 = 2;
 #[link(name = "SceKernelDmacMgr_stub", kind = "static")]
 #[link(name = "SceIme_stub", kind = "static")]
 unsafe extern "C" {
-    pub fn vglInitWithCustomThreshold(
-        pool_size: i32,
-        width: i32,
-        height: i32,
-        ram_reteshold: i32,
-        cdram_threshold: i32,
-        phycont_threshold: i32,
-        cdlg_threshold: i32,
-        msaa: SceGxmMultisampleMode,
-    ) -> bool;
     pub fn vglSetSemanticBindingMode(mode: u32);
     pub fn vglSetParamBufferSize(size: u32);
     pub fn vglUseCachedMem(r#use: bool);
@@ -280,24 +261,13 @@ pub fn main_func() {
     let sdl2_game_controller = sdl2_context.game_controller().unwrap();
     let sdl2_joystick = sdl2_context.joystick().unwrap();
 
-    // SDL2's default vitaGL config isn't ideal, so we gotta get a little unsafe
+    // Configure vitaGL before SDL initializes it while creating the GL window.
     #[cfg(target_os = "vita")]
     unsafe {
         vglSetSemanticBindingMode(VGL_MODE_POSTPONED);
         vglUseCachedMem(false);
         vglUseTripleBuffering(false);
         vglSetParamBufferSize(4 * 1024 * 1024);
-        //vglSetVertexPoolSize(20 * 1024 * 1024);
-        vglInitWithCustomThreshold(
-            0,
-            960,
-            544,
-            4 * 1024 * 1024,
-            0,
-            0,
-            0,
-            SCE_GXM_MULTISAMPLE_NONE,
-        );
     }
 
     let gl_attr = sdl2_video.gl_attr();
