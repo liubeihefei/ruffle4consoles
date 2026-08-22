@@ -1735,8 +1735,12 @@ name = "ruffle4consoles"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "chrono",
+ "encoding_rs",
  "glow",
+ "indexmap",
+ "percent-encoding",
  "ron",
  "ruffle_core",
  "ruffle_render",

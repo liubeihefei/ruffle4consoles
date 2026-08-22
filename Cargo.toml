@@ -18,7 +18,11 @@ ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911e
 ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d" }
 ruffle_render_glow = { path = "ruffle_render_glow" }
 anyhow = "1.0"
+async-channel = "2.5.0"
+encoding_rs = "0.8.35"
 glow = { git = "https://github.com/grovesNL/glow", rev = "aa4238a60d17076b917eaa1ec662e5080df42b0a", features = []}
+indexmap = "2.12.0"
+percent-encoding = "2.3.2"
 ron = "0.11.0"
 serde = "1.0.225"
 tracing = { version = "0.1.43", features = ["log"] }

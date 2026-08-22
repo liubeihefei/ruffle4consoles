@@ -360,10 +360,11 @@ pub fn main_func() {
     let _ = std::fs::create_dir_all(storage_path.clone());
     let mut executor = NullExecutor::new();
 
-    #[cfg(not(target_os = "vita"))]
-    let executor_base_path = std::path::Path::new(BASE_PATH);
     #[cfg(target_os = "vita")]
-    let executor_base_path = std::path::Path::new("/"); // Just use app0
+    let navigator = backends::navigator::VitaNavigatorBackend::new(BASE_PATH, &executor);
+    #[cfg(not(target_os = "vita"))]
+    let navigator =
+        NullNavigatorBackend::with_base_path(std::path::Path::new(BASE_PATH), &executor).unwrap();
 
     let player = PlayerBuilder::new()
         .with_renderer(renderer)
@@ -372,7 +373,7 @@ pub fn main_func() {
         .with_storage(Box::new(DiskStorageBackend::new(std::path::PathBuf::from(
             storage_path,
         ))))
-        .with_navigator(NullNavigatorBackend::with_base_path(executor_base_path, &executor).unwrap())
+        .with_navigator(navigator)
         .with_movie(movie.unwrap())
         .with_viewport_dimensions(dimensions.width, dimensions.height, dimensions.scale_factor)
         .with_fullscreen(true)
