@@ -1339,17 +1339,16 @@ impl RenderBackend for GlowRenderBackend {
         assert!(stride >= entry.width * 4);
         assert!(rgba.len() >= required_bytes);
 
-        tracing::info!(
-            target: "ruffle_render_glow::bitmap",
-            texture_width = entry.width,
-            texture_height = entry.height,
-            x = bounds.x_min,
-            y = bounds.y_min,
-            width = bounds.width(),
-            height = bounds.height(),
-            existing_bytes = rgba.len(),
-            temporary_bytes_avoided = bounds.width() as usize * bounds.height() as usize * 4,
-            "Reading GPU pixels directly into existing BitmapData storage"
+        log::info!(
+            "VITA_BITMAP_READBACK_DIRECT texture={}x{} bounds={},{},{}x{} existing_bytes={} temporary_bytes_avoided={}",
+            entry.width,
+            entry.height,
+            bounds.x_min,
+            bounds.y_min,
+            bounds.width(),
+            bounds.height(),
+            rgba.len(),
+            bounds.width() as usize * bounds.height() as usize * 4,
         );
 
         unsafe {
