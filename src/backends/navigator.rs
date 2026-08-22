@@ -182,9 +182,16 @@ impl SuccessResponse for VitaLocalResponse {
 
     fn body(self: Box<Self>) -> OwnedFuture<Vec<u8>, Error> {
         Box::pin(async move {
-            std::fs::read(&self.path).map_err(|error| {
-                Error::FetchError(format!("{}: {error}", self.path.display()))
-            })
+            let mut bytes = std::fs::read(&self.path)
+                .map_err(|error| Error::FetchError(format!("{}: {error}", self.path.display())))?;
+            if reorder_legacy_swf(&mut bytes) {
+                println!(
+                    "VITA_NAV_REORDERED path={} bytes={}",
+                    self.path.display(),
+                    bytes.len()
+                );
+            }
+            Ok(bytes)
         })
     }
 
@@ -332,6 +339,22 @@ fn contains_forbidden_separator(value: &str) -> bool {
         .any(|character| matches!(character, '/' | '\\' | '\0'))
 }
 
+fn has_swf_header(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"FWS") || bytes.starts_with(b"CWS") || bytes.starts_with(b"ZWS")
+}
+
+fn reorder_legacy_swf(bytes: &mut [u8]) -> bool {
+    const PREFIX_LEN: usize = 165;
+    const SPLIT_AT: usize = 96;
+
+    if has_swf_header(bytes) || bytes.len() < PREFIX_LEN || !has_swf_header(&bytes[SPLIT_AT..]) {
+        return false;
+    }
+
+    bytes[..PREFIX_LEN].rotate_left(SPLIT_AT);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,5 +400,43 @@ mod tests {
         assert!(raw_path_is_unsafe("file:///assets/%2e%2e/secret.bin"));
         assert!(raw_path_is_unsafe("file:///assets/%2Fsecret.bin"));
         assert!(raw_path_is_unsafe("file:///assets/%5csecret.bin"));
+    }
+
+    #[test]
+    fn legacy_swf_reordering_matches_actionscript_copy_order() {
+        let mut bytes = (0..512)
+            .map(|value| (value % 251) as u8)
+            .collect::<Vec<_>>();
+        bytes[96..99].copy_from_slice(b"CWS");
+        let expected = [&bytes[96..165], &bytes[..96], &bytes[165..]].concat();
+
+        assert!(reorder_legacy_swf(&mut bytes));
+        assert_eq!(bytes, expected);
+        assert!(bytes.starts_with(b"CWS"));
+    }
+
+    #[test]
+    fn regular_swf_data_is_unchanged() {
+        for header in [b"FWS", b"CWS", b"ZWS"] {
+            let mut bytes = vec![0xA5; 256];
+            bytes[..3].copy_from_slice(header);
+            let expected = bytes.clone();
+
+            assert!(!reorder_legacy_swf(&mut bytes));
+            assert_eq!(bytes, expected);
+        }
+    }
+
+    #[test]
+    fn short_and_non_swf_data_is_unchanged() {
+        let mut short = vec![0x5A; 164];
+        let expected_short = short.clone();
+        assert!(!reorder_legacy_swf(&mut short));
+        assert_eq!(short, expected_short);
+
+        let mut other = vec![0x5A; 256];
+        let expected_other = other.clone();
+        assert!(!reorder_legacy_swf(&mut other));
+        assert_eq!(other, expected_other);
     }
 }
