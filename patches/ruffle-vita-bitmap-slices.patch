@@ -218,6 +218,88 @@ index d2e4574f6..ecf0ca09d 100644
      let context = args.try_get_object(1);
  
      let loader_info = this
+diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
+index d77a7fc6c..268e3c6de 100644
+--- a/core/src/bitmap/bitmap_data.rs
++++ b/core/src/bitmap/bitmap_data.rs
+@@ -174,6 +174,13 @@ impl Color {
+     fn slice_as_rgba(slice: &[Self]) -> &[u8] {
+         bytemuck::cast_slice(slice)
+     }
++
++    fn slice_as_rgba_mut(slice: &mut [Self]) -> &mut [u8] {
++        // Color is exactly four u8 fields and every possible byte pattern is valid.
++        unsafe {
++            std::slice::from_raw_parts_mut(slice.as_mut_ptr().cast(), std::mem::size_of_val(slice))
++        }
++    }
+ }
+ 
+ impl std::fmt::Display for Color {
+@@ -525,14 +532,45 @@ mod wrapper {
+                 .borrow_mut();
+             match std::mem::replace(&mut write.dirty_state, DirtyState::Clean) {
+                 DirtyState::GpuModified(sync_handle, bounds) => {
+-                    renderer
+-                        .resolve_sync_handle(
+-                            sync_handle,
+-                            Box::new(|buffer, buffer_width| {
+-                                copy_pixels_to_bitmapdata(&mut write, buffer, buffer_width, bounds)
+-                            }),
++                    let mut sync_handle = Some(sync_handle);
++                    let stride = write.width() * 4;
++                    let resolved_into_existing = renderer
++                        .resolve_sync_handle_into(
++                            &mut sync_handle,
++                            write.pixels_rgba_mut(),
++                            stride,
+                         )
+-                        .expect("Failed to sync BitmapData");
++                        .expect("Failed to sync BitmapData into existing pixels");
++
++                    if resolved_into_existing {
++                        debug_assert!(sync_handle.is_none());
++                        if !write.transparency() {
++                            let width = write.width();
++                            for y in bounds.y_min..bounds.y_max {
++                                let start = (y * width + bounds.x_min) as usize;
++                                let end = (y * width + bounds.x_max) as usize;
++                                for color in &mut write.raw_pixels_mut()[start..end] {
++                                    *color = color.with_alpha(255);
++                                }
++                            }
++                        }
++                    } else {
++                        renderer
++                            .resolve_sync_handle(
++                                sync_handle.expect(
++                                    "Backend consumed a sync handle without resolving it",
++                                ),
++                                Box::new(|buffer, buffer_width| {
++                                    copy_pixels_to_bitmapdata(
++                                        &mut write,
++                                        buffer,
++                                        buffer_width,
++                                        bounds,
++                                    )
++                                }),
++                            )
++                            .expect("Failed to sync BitmapData");
++                    }
+                     write.dirty_state = DirtyState::Clean;
+                     #[cfg(feature = "egui")]
+                     write.egui_texture.borrow_mut().take();
+@@ -865,6 +903,10 @@ impl<'gc> BitmapRawData<'gc> {
+         Color::slice_as_rgba(&self.pixels)
+     }
+ 
++    pub fn pixels_rgba_mut(&mut self) -> &mut [u8] {
++        Color::slice_as_rgba_mut(&mut self.pixels)
++    }
++
+     pub fn width(&self) -> u32 {
+         self.width
+     }
 diff --git a/core/src/character.rs b/core/src/character.rs
 index d5e7c23d1..cfa2bde44 100644
 --- a/core/src/character.rs
@@ -768,6 +850,28 @@ index e8731abf5..a285046f1 100644
      ) -> Result<(), Error> {
          let clip = match uc.load_manager.get_loader(handle) {
              Some(Self { target_clip, .. }) => *target_clip,
+diff --git a/render/src/backend.rs b/render/src/backend.rs
+index 666934b9a..28425ee88 100644
+--- a/render/src/backend.rs
++++ b/render/src/backend.rs
+@@ -111,6 +111,17 @@ pub trait RenderBackend: Any {
+         handle: Box<dyn SyncHandle>,
+         with_rgba: RgbaBufRead,
+     ) -> Result<(), Error>;
++
++    /// Tries to resolve a GPU readback directly into an existing RGBA buffer.
++    /// Backends that cannot support this leave `handle` untouched and return false.
++    fn resolve_sync_handle_into(
++        &mut self,
++        _handle: &mut Option<Box<dyn SyncHandle>>,
++        _rgba: &mut [u8],
++        _stride: u32,
++    ) -> Result<bool, Error> {
++        Ok(false)
++    }
+ }
+ 
+ pub enum PixelBenderTarget {
 diff --git a/swf/src/read.rs b/swf/src/read.rs
 index d9d16cf26..dd925ec78 100644
 --- a/swf/src/read.rs

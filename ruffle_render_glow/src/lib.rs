@@ -1322,6 +1322,88 @@ impl RenderBackend for GlowRenderBackend {
         Ok(())
     }
 
+    fn resolve_sync_handle_into(
+        &mut self,
+        handle: &mut Option<Box<dyn SyncHandle>>,
+        rgba: &mut [u8],
+        stride: u32,
+    ) -> Result<bool, ruffle_render::error::Error> {
+        let handle = handle.take().expect("Missing Glow sync handle");
+        let handle = Box::<dyn Any>::downcast::<QueueSyncHandle>(handle).unwrap();
+        let entry = &as_registry_data(&handle.texture);
+        let bounds = handle.bounds;
+        let row_bytes = bounds.width() * 4;
+        let required_bytes = entry.height as usize * stride as usize;
+
+        assert!(stride >= entry.width * 4);
+        assert!(rgba.len() >= required_bytes);
+
+        tracing::info!(
+            target: "ruffle_render_glow::bitmap",
+            texture_width = entry.width,
+            texture_height = entry.height,
+            x = bounds.x_min,
+            y = bounds.y_min,
+            width = bounds.width(),
+            height = bounds.height(),
+            existing_bytes = rgba.len(),
+            temporary_bytes_avoided = bounds.width() as usize * bounds.height() as usize * 4,
+            "Reading GPU pixels directly into existing BitmapData storage"
+        );
+
+        unsafe {
+            self.gl
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(self.offscreen_framebuffer));
+            self.gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(entry.texture),
+                0,
+            );
+
+            if bounds.x_min == 0 && bounds.width() == entry.width {
+                let start = bounds.y_min as usize * stride as usize;
+                let end = start + bounds.height() as usize * stride as usize;
+                self.gl.read_pixels(
+                    0,
+                    bounds.y_min as i32,
+                    bounds.width() as i32,
+                    bounds.height() as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    PixelPackData::Slice(Some(&mut rgba[start..end])),
+                );
+            } else {
+                for y in bounds.y_min..bounds.y_max {
+                    let start = y as usize * stride as usize
+                        + bounds.x_min as usize * 4;
+                    let end = start + row_bytes as usize;
+                    self.gl.read_pixels(
+                        bounds.x_min as i32,
+                        y as i32,
+                        bounds.width() as i32,
+                        1,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        PixelPackData::Slice(Some(&mut rgba[start..end])),
+                    );
+                }
+            }
+
+            self.gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                None,
+                0,
+            );
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+
+        Ok(true)
+    }
+
     fn run_pixelbender_shader(
         &mut self,
         _handle: ruffle_render::pixel_bender::PixelBenderShaderHandle,
