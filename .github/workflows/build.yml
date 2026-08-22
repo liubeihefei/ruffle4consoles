@@ -60,7 +60,19 @@ jobs:
                 make PRIMITIVES_SPEEDHACK=0 USE_SCRATCH_MEMORY=1 HAVE_CUSTOM_HEAP=1 HAVE_PTHREAD=1 HAVE_VITA3K_SUPPORT=1 NO_SPLASHSCREEN=1 LOG_ERRORS=1 install -j$(nproc)
      
             - name: Build
-              run: ./build_psp2.sh
+              shell: bash
+              run: |
+                set +e
+                ./build_psp2.sh 2>&1 | tee /tmp/vita-build.log
+                status=${PIPESTATUS[0]}
+                if [ "$status" -ne 0 ]; then
+                  details=$(tail -n 120 /tmp/vita-build.log)
+                  details=${details//'%'/'%25'}
+                  details=${details//$'\r'/'%0D'}
+                  details=${details//$'\n'/'%0A'}
+                  echo "::error title=PSVita build failed::$details"
+                fi
+                exit "$status"
 
             - uses: actions/upload-artifact@v7
               with:
