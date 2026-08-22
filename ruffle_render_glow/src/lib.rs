@@ -1322,6 +1322,7 @@ impl RenderBackend for GlowRenderBackend {
         Ok(())
     }
 
+    #[cfg(target_os = "vita")]
     fn resolve_sync_handle_into(
         &mut self,
         handle: &mut Option<Box<dyn SyncHandle>>,
