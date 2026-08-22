@@ -327,6 +327,75 @@ index d5e7c23d1..cfa2bde44 100644
              }
          }
      }
+diff --git a/core/src/display_object/graphic.rs b/core/src/display_object/graphic.rs
+index be263fbbb..d7c379d93 100644
+--- a/core/src/display_object/graphic.rs
++++ b/core/src/display_object/graphic.rs
+@@ -51,15 +51,10 @@ impl<'gc> Graphic<'gc> {
+         swf_shape: swf::Shape,
+         movie: Arc<SwfMovie>,
+     ) -> Self {
+-        let library = context.library.library_for_movie(movie.clone()).unwrap();
+         let shared = GraphicShared {
+             id: swf_shape.id,
+             bounds: swf_shape.shape_bounds,
+-            render_handle: Some(
+-                context
+-                    .renderer
+-                    .register_shape((&swf_shape).into(), &MovieLibrarySource { library }),
+-            ),
++            render_handle: OnceCell::new(),
+             shape: swf_shape,
+             movie,
+         };
+@@ -81,7 +76,7 @@ impl<'gc> Graphic<'gc> {
+         let shared = GraphicShared {
+             id: 0,
+             bounds: Default::default(),
+-            render_handle: None,
++            render_handle: OnceCell::new(),
+             shape: swf::Shape {
+                 version: 32,
+                 id: 0,
+@@ -191,7 +186,8 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
+ 
+         if let Some(drawing) = self.0.drawing.get() {
+             drawing.borrow().render(context);
+-        } else if let Some(render_handle) = self.0.shared.get().render_handle.clone() {
++        } else {
++            let render_handle = self.0.shared.get().render_handle(context);
+             context
+                 .commands
+                 .render_shape(render_handle, context.transform_stack.transform())
+@@ -265,7 +261,27 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
+ struct GraphicShared {
+     id: CharacterId,
+     shape: swf::Shape,
+-    render_handle: Option<ShapeHandle>,
++    render_handle: OnceCell<ShapeHandle>,
+     bounds: Rectangle<Twips>,
+     movie: Arc<SwfMovie>,
+ }
++
++impl GraphicShared {
++    fn render_handle<'gc>(&self, context: &mut RenderContext<'_, 'gc>) -> ShapeHandle {
++        if let Some(handle) = self.render_handle.get() {
++            return handle.clone();
++        }
++
++        let library = context
++            .library
++            .library_for_movie(self.movie.clone())
++            .unwrap();
++        let handle = context
++            .renderer
++            .register_shape((&self.shape).into(), &MovieLibrarySource { library });
++        self.render_handle
++            .set(handle.clone())
++            .expect("shape handle should only be registered once");
++        handle
++    }
++}
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
 index 767b1bb1c..1465747fb 100644
 --- a/core/src/display_object/movie_clip.rs
