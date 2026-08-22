@@ -11,6 +11,24 @@ jobs:
         steps:
             - uses: actions/checkout@v6
 
+            - name: Prepare memory-optimized Ruffle
+              run: |
+                git init ruffle-vita-core
+                git -C ruffle-vita-core remote add origin https://github.com/ruffle-rs/ruffle
+                git -C ruffle-vita-core fetch --depth=1 origin 563854a8911eda672b1836fb374063162879035d
+                git -C ruffle-vita-core checkout --detach FETCH_HEAD
+                git -C ruffle-vita-core apply --check ../patches/ruffle-vita-bitmap-slices.patch
+                git -C ruffle-vita-core apply ../patches/ruffle-vita-bitmap-slices.patch
+                sed -i 's#ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d",#ruffle_core = { path = "ruffle-vita-core/core",#' Cargo.toml
+                sed -i 's#ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d" }#ruffle_render = { path = "ruffle-vita-core/render" }#' Cargo.toml
+                sed -i 's#ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d", features = \["tessellator"\] }#ruffle_render = { path = "../ruffle-vita-core/render", features = ["tessellator"] }#' ruffle_render_glow/Cargo.toml
+                sed -i 's#swf = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d" }#swf = { path = "../ruffle-vita-core/swf" }#' ruffle_render_glow/Cargo.toml
+                grep -Fq 'ruffle_core = { path = "ruffle-vita-core/core",' Cargo.toml
+                grep -Fq 'ruffle_render = { path = "ruffle-vita-core/render" }' Cargo.toml
+                grep -Fq 'ruffle_render = { path = "../ruffle-vita-core/render", features = ["tessellator"] }' ruffle_render_glow/Cargo.toml
+                grep -Fq 'swf = { path = "../ruffle-vita-core/swf" }' ruffle_render_glow/Cargo.toml
+                git -C ruffle-vita-core diff --check
+
             - name: Install Java and Northfear SDL
               run: |
                 apk add --no-cache openjdk11 cmake samurai
@@ -40,7 +58,7 @@ jobs:
                 make PRIMITIVES_SPEEDHACK=0 USE_SCRATCH_MEMORY=1 HAVE_CUSTOM_HEAP=1 HAVE_PTHREAD=1 HAVE_VITA3K_SUPPORT=1 NO_SPLASHSCREEN=1 LOG_ERRORS=1 install -j$(nproc)
      
             - name: Build
-              run: ./build_psp2.sh
+              run: VITA_LOCAL_RUFFLE=1 ./build_psp2.sh
 
             - uses: actions/upload-artifact@v7
               with:

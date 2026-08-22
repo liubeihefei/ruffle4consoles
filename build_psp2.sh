@@ -8,4 +8,8 @@
 #export RUSTFLAGS="$RUSTFLAGS -Clink-arg=-Wl,--wrap=memset"
 #export RUSTFLAGS="$RUSTFLAGS -Clink-arg=-Wl,-q"
 export RUSTFLAGS="$RUSTFLAGS -C target-cpu=cortex-a9"
-cargo +nightly vita build vpk --profile=vita --locked
+if [ "${VITA_LOCAL_RUFFLE:-0}" = "1" ]; then
+    cargo +nightly vita build vpk --profile=vita
+else
+    cargo +nightly vita build vpk --profile=vita --locked
+fi

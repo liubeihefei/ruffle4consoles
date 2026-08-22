@@ -1,0 +1,269 @@
+diff --git a/core/src/character.rs b/core/src/character.rs
+index d5e7c23d1..cfa2bde44 100644
+--- a/core/src/character.rs
++++ b/core/src/character.rs
+@@ -1,3 +1,4 @@
++use std::borrow::Cow;
+ use std::cell::OnceCell;
+ 
+ use crate::backend::audio::SoundHandle;
+@@ -6,13 +7,14 @@ use crate::display_object::{
+     Avm1Button, Avm2Button, BitmapClass, EditText, Graphic, MorphShape, MovieClip, Text, Video,
+ };
+ use crate::font::Font;
++use crate::tag_utils::SwfSlice;
+ use gc_arena::barrier::unlock;
+ use gc_arena::lock::Lock;
+ use gc_arena::{Collect, Gc, Mutation};
+ use ruffle_render::backend::RenderBackend;
+ use ruffle_render::bitmap::{Bitmap as RenderBitmap, BitmapHandle, BitmapSize};
+ use ruffle_render::error::Error as RenderError;
+-use swf::DefineBitsLossless;
++use swf::{BitmapFormat, CharacterId, DefineBitsLossless};
+ 
+ #[derive(Copy, Clone, Collect, Debug)]
+ #[collect(no_drop)]
+@@ -88,12 +90,36 @@ impl<'gc> BitmapCharacter<'gc> {
+ #[derive(Clone, Debug)]
+ pub enum CompressedBitmap {
+     Jpeg {
+-        data: Vec<u8>,
+-        alpha: Option<Vec<u8>>,
++        data: CompressedBitmapData,
++        alpha: Option<SwfSlice>,
+         width: u16,
+         height: u16,
+     },
+-    Lossless(DefineBitsLossless<'static>),
++    Lossless {
++        data: SwfSlice,
++        id: CharacterId,
++        format: BitmapFormat,
++        width: u16,
++        height: u16,
++        version: u8,
++    },
++}
++
++/// Compressed bitmap bytes either produced during parsing or borrowed from the
++/// decompressed SWF tag stream.
++#[derive(Clone, Debug)]
++pub enum CompressedBitmapData {
++    Owned(Vec<u8>),
++    Swf(SwfSlice),
++}
++
++impl AsRef<[u8]> for CompressedBitmapData {
++    fn as_ref(&self) -> &[u8] {
++        match self {
++            Self::Owned(data) => data,
++            Self::Swf(data) => data.data(),
++        }
++    }
+ }
+ 
+ impl CompressedBitmap {
+@@ -103,9 +129,9 @@ impl CompressedBitmap {
+                 width: *width,
+                 height: *height,
+             },
+-            CompressedBitmap::Lossless(define_bits_lossless) => BitmapSize {
+-                width: define_bits_lossless.width,
+-                height: define_bits_lossless.height,
++            CompressedBitmap::Lossless { width, height, .. } => BitmapSize {
++                width: *width,
++                height: *height,
+             },
+         }
+     }
+@@ -116,9 +142,27 @@ impl CompressedBitmap {
+                 alpha,
+                 width: _,
+                 height: _,
+-            } => ruffle_render::utils::decode_define_bits_jpeg(data, alpha.as_deref()),
+-            CompressedBitmap::Lossless(define_bits_lossless) => {
+-                ruffle_render::utils::decode_define_bits_lossless(define_bits_lossless)
++            } => ruffle_render::utils::decode_define_bits_jpeg(
++                data.as_ref(),
++                alpha.as_ref().map(SwfSlice::data),
++            ),
++            CompressedBitmap::Lossless {
++                data,
++                id,
++                format,
++                width,
++                height,
++                version,
++            } => {
++                let define_bits_lossless = DefineBitsLossless {
++                    data: Cow::Borrowed(data.data()),
++                    id: *id,
++                    format: *format,
++                    width: *width,
++                    height: *height,
++                    version: *version,
++                };
++                ruffle_render::utils::decode_define_bits_lossless(&define_bits_lossless)
+             }
+         }
+     }
+diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
+index 767b1bb1c..1465747fb 100644
+--- a/core/src/display_object/movie_clip.rs
++++ b/core/src/display_object/movie_clip.rs
+@@ -14,7 +14,7 @@ use crate::backend::audio::{AudioManager, SoundInstanceHandle};
+ use crate::backend::navigator::Request;
+ use crate::backend::ui::MouseCursor;
+ use crate::binary_data::BinaryData;
+-use crate::character::{BitmapCharacter, Character, CompressedBitmap};
++use crate::character::{BitmapCharacter, Character, CompressedBitmap, CompressedBitmapData};
+ use crate::context::{ActionType, RenderContext, UpdateContext};
+ use crate::display_object::container::{dispatch_removed_event, ChildContainer};
+ use crate::display_object::interactive::{
+@@ -52,7 +52,7 @@ use std::cmp::max;
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ use swf::extensions::ReadSwfExt;
+-use swf::{ClipEventFlag, DefineBitsLossless, FrameLabelData, TagCode, UTF_8};
++use swf::{ClipEventFlag, FrameLabelData, TagCode, UTF_8};
+ 
+ use super::interactive::Avm2MousePick;
+ use super::BitmapClass;
+@@ -573,6 +573,17 @@ impl<'gc> MovieClip<'gc> {
+         shared.import_exports_of_importer(context);
+ 
+         if is_finished {
++            let bitmap_bytes_reused = progress.bitmap_bytes_reused.get();
++            if bitmap_bytes_reused != 0 {
++                tracing::info!(
++                    target: "ruffle_core::bitmap",
++                    movie_url = swf.movie.url(),
++                    clip_id = shared.id,
++                    bitmap_slices_reused = progress.bitmap_slices_reused.get(),
++                    bitmap_bytes_reused,
++                    "Reused compressed bitmap data from the SWF tag stream"
++                );
++            }
+             if progress.cur_preload_frame.get() == 1 {
+                 // If this clip did not have any show frame tags,
+                 // treat the end-of-clip as a ShowFrame
+@@ -3293,16 +3304,18 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+         version: u8,
+     ) -> Result<(), Error> {
+         let define_bits_lossless = reader.read_define_bits_lossless(version)?;
++        let data = self.swf.to_subslice(define_bits_lossless.data.as_ref());
++        self.record_reused_bitmap_data(data.len());
+         let bitmap = Gc::new(
+             context.gc(),
+-            BitmapCharacter::new(CompressedBitmap::Lossless(DefineBitsLossless {
++            BitmapCharacter::new(CompressedBitmap::Lossless {
+                 id: define_bits_lossless.id,
+                 format: define_bits_lossless.format,
+                 width: define_bits_lossless.width,
+                 height: define_bits_lossless.height,
+                 version: define_bits_lossless.version,
+-                data: Cow::Owned(define_bits_lossless.data.into_owned()),
+-            })),
++                data,
++            }),
+         );
+         self.library_mut(context)
+             .register_character(define_bits_lossless.id, Character::Bitmap(bitmap));
+@@ -3420,9 +3433,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+         let library = self.library_mut(context);
+         let (id, jpeg_data) = reader.read_define_bits()?;
+         let jpeg_tables = library.jpeg_tables();
+-        let jpeg_data =
+-            ruffle_render::utils::glue_tables_to_jpeg(jpeg_data, jpeg_tables).into_owned();
+-        let (width, height) = ruffle_render::utils::decode_define_bits_jpeg_dimensions(&jpeg_data)?;
++        let jpeg_data = ruffle_render::utils::glue_tables_to_jpeg(jpeg_data, jpeg_tables);
++        let (width, height) =
++            ruffle_render::utils::decode_define_bits_jpeg_dimensions(jpeg_data.as_ref())?;
++        let jpeg_data = match jpeg_data {
++            Cow::Borrowed(jpeg_data) => {
++                let jpeg_data = self.swf.to_subslice(jpeg_data);
++                self.record_reused_bitmap_data(jpeg_data.len());
++                CompressedBitmapData::Swf(jpeg_data)
++            }
++            Cow::Owned(jpeg_data) => CompressedBitmapData::Owned(jpeg_data),
++        };
+         let bitmap = Character::Bitmap(Gc::new(
+             mc,
+             BitmapCharacter::new(CompressedBitmap::Jpeg {
+@@ -3444,10 +3465,12 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+     ) -> Result<(), Error> {
+         let (id, jpeg_data) = reader.read_define_bits_jpeg_2()?;
+         let (width, height) = ruffle_render::utils::decode_define_bits_jpeg_dimensions(jpeg_data)?;
++        let jpeg_data = self.swf.to_subslice(jpeg_data);
++        self.record_reused_bitmap_data(jpeg_data.len());
+         let bitmap = Character::Bitmap(Gc::new(
+             context.gc(),
+             BitmapCharacter::new(CompressedBitmap::Jpeg {
+-                data: jpeg_data.to_owned(),
++                data: CompressedBitmapData::Swf(jpeg_data),
+                 alpha: None,
+                 width,
+                 height,
+@@ -3466,12 +3489,16 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+     ) -> Result<(), Error> {
+         let jpeg = reader.read_define_bits_jpeg_3(version)?;
+         let (width, height) = ruffle_render::utils::decode_define_bits_jpeg_dimensions(jpeg.data)?;
++        let jpeg_data = self.swf.to_subslice(jpeg.data);
++        let alpha_data = self.swf.to_subslice(jpeg.alpha_data);
++        self.record_reused_bitmap_data(jpeg_data.len());
++        self.record_reused_bitmap_data(alpha_data.len());
+ 
+         let bitmap = Character::Bitmap(Gc::new(
+             context.gc(),
+             BitmapCharacter::new(CompressedBitmap::Jpeg {
+-                data: jpeg.data.to_owned(),
+-                alpha: Some(jpeg.alpha_data.to_owned()),
++                data: CompressedBitmapData::Swf(jpeg_data),
++                alpha: Some(alpha_data),
+                 width,
+                 height,
+             }),
+@@ -4448,6 +4475,12 @@ struct PreloadProgress {
+     /// If this movie is currently executing an ImportAssets/2.
+     /// If true, this movie should **not** execute, and should be considered as still loading.
+     awaiting_import: Cell<bool>,
++
++    /// Number of compressed bitmap slices retained by reference instead of copied.
++    bitmap_slices_reused: Cell<usize>,
++
++    /// Number of compressed bitmap bytes retained by reference instead of copied.
++    bitmap_bytes_reused: Cell<usize>,
+ }
+ 
+ impl Default for PreloadProgress {
+@@ -4459,6 +4492,8 @@ impl Default for PreloadProgress {
+             start_pos: Cell::new(0),
+             cur_preload_symbol: Cell::new(None),
+             awaiting_import: Cell::new(false),
++            bitmap_slices_reused: Cell::new(0),
++            bitmap_bytes_reused: Cell::new(0),
+         }
+     }
+ }
+@@ -4516,6 +4551,21 @@ struct EagerTags {
+ }
+ 
+ impl<'gc> MovieClipShared<'gc> {
++    fn record_reused_bitmap_data(&self, bytes: usize) {
++        self.preload_progress.bitmap_slices_reused.set(
++            self.preload_progress
++                .bitmap_slices_reused
++                .get()
++                .saturating_add(1),
++        );
++        self.preload_progress.bitmap_bytes_reused.set(
++            self.preload_progress
++                .bitmap_bytes_reused
++                .get()
++                .saturating_add(bytes),
++        );
++    }
++
+     fn empty(movie: Arc<SwfMovie>) -> Self {
+         let mut s = Self::with_data(0, SwfSlice::empty(movie), 1, None, None);
+ 
