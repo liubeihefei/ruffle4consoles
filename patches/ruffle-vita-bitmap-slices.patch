@@ -1,3 +1,223 @@
+diff --git a/core/src/avm2/bytearray.rs b/core/src/avm2/bytearray.rs
+index 3df385b61..4a5452cc4 100644
+--- a/core/src/avm2/bytearray.rs
++++ b/core/src/avm2/bytearray.rs
+@@ -11,6 +11,7 @@ use std::cmp;
+ use std::fmt::{self, Display, Formatter};
+ use std::io::prelude::*;
+ use std::io::{self, SeekFrom};
++use std::sync::Arc;
+ 
+ #[derive(Clone, Collect, Debug, Copy, PartialEq, Eq)]
+ #[collect(no_drop)]
+@@ -86,7 +87,7 @@ pub enum ObjectEncoding {
+ #[derive(Clone, Debug)]
+ pub struct ByteArrayStorage {
+     /// Underlying ByteArray
+-    bytes: Vec<u8>,
++    bytes: Arc<Vec<u8>>,
+ 
+     /// The current position to read/write from
+     position: Cell<usize>,
+@@ -102,7 +103,7 @@ impl ByteArrayStorage {
+     /// Create a new ByteArrayStorage
+     pub fn new(context: &mut UpdateContext<'_>) -> ByteArrayStorage {
+         ByteArrayStorage {
+-            bytes: Vec::new(),
++            bytes: Arc::new(Vec::new()),
+             position: Cell::new(0),
+             endian: Endian::Big,
+             object_encoding: context.avm2.default_bytearray_encoding,
+@@ -112,7 +113,7 @@ impl ByteArrayStorage {
+     /// Create a new ByteArrayStorage using an already existing vector
+     pub fn from_vec(context: &mut UpdateContext<'_>, bytes: Vec<u8>) -> ByteArrayStorage {
+         ByteArrayStorage {
+-            bytes,
++            bytes: Arc::new(bytes),
+             position: Cell::new(0),
+             endian: Endian::Big,
+             object_encoding: context.avm2.default_bytearray_encoding,
+@@ -177,7 +178,7 @@ impl ByteArrayStorage {
+         if self.len() < new_len {
+             self.set_length(new_len);
+         }
+-        self.bytes
++        Arc::make_mut(&mut self.bytes)
+             .get_mut(offset..new_len)
+             .expect("ByteArray write out of bounds")
+             .copy_from_slice(buf);
+@@ -187,7 +188,7 @@ impl ByteArrayStorage {
+     /// Write bytes at any offset in the ByteArray
+     /// Will return an error if the new buffer does not fit the ByteArray
+     pub fn write_at_nongrowing(&mut self, buf: &[u8], offset: usize) -> Result<(), ByteArrayError> {
+-        self.bytes
++        Arc::make_mut(&mut self.bytes)
+             .get_mut(offset..)
+             .and_then(|bytes| bytes.get_mut(..buf.len()))
+             .ok_or(ByteArrayError::IndexOutOfBounds)?
+@@ -220,7 +221,7 @@ impl ByteArrayStorage {
+             self.set_length(new_len);
+         }
+ 
+-        self.bytes.copy_within(start..end, offset);
++        Arc::make_mut(&mut self.bytes).copy_within(start..end, offset);
+         Ok(())
+     }
+ 
+@@ -231,17 +232,19 @@ impl ByteArrayStorage {
+             CompressionAlgorithm::Zlib => {
+                 // Note: some content is sensitive to compression type
+                 // (as it's visible in the header)
+-                let mut encoder = ZlibEncoder::new(&*self.bytes, Compression::best());
++                let mut encoder = ZlibEncoder::new(self.bytes.as_slice(), Compression::best());
+                 encoder.read_to_end(&mut buffer).err().map(|e| e.into())
+             }
+             CompressionAlgorithm::Deflate => {
+-                let mut encoder = DeflateEncoder::new(&*self.bytes, Compression::best());
++                let mut encoder = DeflateEncoder::new(self.bytes.as_slice(), Compression::best());
+                 encoder.read_to_end(&mut buffer).err().map(|e| e.into())
+             }
+             #[cfg(feature = "lzma")]
+-            CompressionAlgorithm::Lzma => lzma_rs::lzma_compress(&mut &*self.bytes, &mut buffer)
+-                .err()
+-                .map(|e| e.into()),
++            CompressionAlgorithm::Lzma => {
++                lzma_rs::lzma_compress(&mut self.bytes.as_slice(), &mut buffer)
++                    .err()
++                    .map(|e| e.into())
++            }
+             #[cfg(not(feature = "lzma"))]
+             CompressionAlgorithm::Lzma => Some("Ruffle was not compiled with LZMA support".into()),
+         };
+@@ -258,17 +261,19 @@ impl ByteArrayStorage {
+         let mut buffer = Vec::new();
+         let error: Option<Box<dyn std::error::Error>> = match algorithm {
+             CompressionAlgorithm::Zlib => {
+-                let mut decoder = ZlibDecoder::new(&*self.bytes);
++                let mut decoder = ZlibDecoder::new(self.bytes.as_slice());
+                 decoder.read_to_end(&mut buffer).err().map(|e| e.into())
+             }
+             CompressionAlgorithm::Deflate => {
+-                let mut decoder = DeflateDecoder::new(&*self.bytes);
++                let mut decoder = DeflateDecoder::new(self.bytes.as_slice());
+                 decoder.read_to_end(&mut buffer).err().map(|e| e.into())
+             }
+             #[cfg(feature = "lzma")]
+-            CompressionAlgorithm::Lzma => lzma_rs::lzma_decompress(&mut &*self.bytes, &mut buffer)
+-                .err()
+-                .map(|e| e.into()),
++            CompressionAlgorithm::Lzma => {
++                lzma_rs::lzma_decompress(&mut self.bytes.as_slice(), &mut buffer)
++                    .err()
++                    .map(|e| e.into())
++            }
+             #[cfg(not(feature = "lzma"))]
+             CompressionAlgorithm::Lzma => Some("Ruffle was not compiled with LZMA support".into()),
+         };
+@@ -306,18 +311,18 @@ impl ByteArrayStorage {
+ 
+     #[inline]
+     pub fn clear(&mut self) {
+-        self.bytes.clear();
++        Arc::make_mut(&mut self.bytes).clear();
+         self.position.set(0)
+     }
+ 
+     #[inline]
+     pub fn shrink_to_fit(&mut self) {
+-        self.bytes.shrink_to_fit()
++        Arc::make_mut(&mut self.bytes).shrink_to_fit()
+     }
+ 
+     #[inline]
+     pub fn set_length(&mut self, new_len: usize) {
+-        self.bytes.resize(new_len, 0);
++        Arc::make_mut(&mut self.bytes).resize(new_len, 0);
+         self.position.set(self.position().min(new_len));
+     }
+ 
+@@ -327,19 +332,19 @@ impl ByteArrayStorage {
+ 
+     pub fn set(&mut self, item: usize, value: u8) {
+         if self.len() < (item + 1) {
+-            self.bytes.resize(item + 1, 0)
++            Arc::make_mut(&mut self.bytes).resize(item + 1, 0)
+         }
+ 
+-        *self.bytes.get_mut(item).unwrap() = value;
++        *Arc::make_mut(&mut self.bytes).get_mut(item).unwrap() = value;
+     }
+ 
+     /// Write a single byte at any offset in the bytearray, panicking if out of bounds.
+     pub fn set_nongrowing(&mut self, item: usize, value: u8) {
+-        self.bytes[item] = value;
++        Arc::make_mut(&mut self.bytes)[item] = value;
+     }
+ 
+     pub fn delete(&mut self, item: usize) {
+-        if let Some(i) = self.bytes.get_mut(item) {
++        if let Some(i) = Arc::make_mut(&mut self.bytes).get_mut(item) {
+             *i = 0;
+         }
+     }
+@@ -351,7 +356,12 @@ impl ByteArrayStorage {
+ 
+     #[inline]
+     pub fn bytes_mut(&mut self) -> &mut [u8] {
+-        &mut self.bytes
++        Arc::make_mut(&mut self.bytes).as_mut_slice()
++    }
++
++    #[inline]
++    pub fn shared_bytes(&self) -> Arc<Vec<u8>> {
++        self.bytes.clone()
+     }
+ 
+     #[inline]
+@@ -488,3 +498,25 @@ macro_rules! impl_read{
+ 
+ impl_write!(write_float f32, write_double f64, write_int i32, write_unsigned_int u32, write_short i16, write_unsigned_short u16);
+ impl_read!(read_float read_float_at 4; f32, read_double read_double_at 8; f64, read_int read_int_at 4; i32, read_unsigned_int read_unsigned_int_at 4; u32, read_short read_short_at 2; i16, read_unsigned_short read_unsigned_short_at 2; u16, read_byte read_byte_at 1; i8, read_unsigned_byte read_unsigned_byte_at 1; u8);
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn shared_bytes_are_copy_on_write() {
++        let mut storage = ByteArrayStorage {
++            bytes: Arc::new(vec![1, 2, 3]),
++            position: Cell::new(0),
++            endian: Endian::Big,
++            object_encoding: ObjectEncoding::Amf3,
++        };
++        let shared = storage.shared_bytes();
++
++        storage.set_nongrowing(1, 9);
++
++        assert_eq!(shared.as_slice(), &[1, 2, 3]);
++        assert_eq!(ByteArrayStorage::bytes(&storage), &[1, 9, 3]);
++        assert!(!Arc::ptr_eq(&shared, &storage.bytes));
++    }
++}
+diff --git a/core/src/avm2/globals/flash/display/loader.rs b/core/src/avm2/globals/flash/display/loader.rs
+index d2e4574f6..ecf0ca09d 100644
+--- a/core/src/avm2/globals/flash/display/loader.rs
++++ b/core/src/avm2/globals/flash/display/loader.rs
+@@ -235,7 +235,12 @@ pub fn load_bytes<'gc>(
+     let this = this.as_object().unwrap();
+ 
+     let arg0 = args.get_object(activation, 0, "data")?;
+-    let bytes = arg0.as_bytearray().unwrap().bytes().to_vec();
++    let bytes = arg0.as_bytearray().unwrap().shared_bytes();
++    tracing::info!(
++        target: "ruffle_core::loader",
++        bytes_shared = bytes.len(),
++        "Reusing ByteArray storage for Loader.loadBytes"
++    );
+     let context = args.try_get_object(1);
+ 
+     let loader_info = this
 diff --git a/core/src/character.rs b/core/src/character.rs
 index d5e7c23d1..cfa2bde44 100644
 --- a/core/src/character.rs
@@ -267,3 +487,25 @@ index 767b1bb1c..1465747fb 100644
      fn empty(movie: Arc<SwfMovie>) -> Self {
          let mut s = Self::with_data(0, SwfSlice::empty(movie), 1, None, None);
  
+diff --git a/core/src/loader.rs b/core/src/loader.rs
+index e8731abf5..a285046f1 100644
+--- a/core/src/loader.rs
++++ b/core/src/loader.rs
+@@ -375,7 +375,7 @@ impl<'gc> LoadManager<'gc> {
+     pub fn load_movie_into_clip_bytes(
+         context: &mut UpdateContext<'gc>,
+         target_clip: DisplayObject<'gc>,
+-        bytes: Vec<u8>,
++        bytes: Arc<Vec<u8>>,
+         vm_data: MovieLoaderVMData<'gc>,
+     ) -> Result<(), Error> {
+         let loader = MovieLoader {
+@@ -779,7 +779,7 @@ impl<'gc> MovieLoader<'gc> {
+     pub fn movie_loader_bytes(
+         handle: LoaderHandle,
+         uc: &mut UpdateContext<'gc>,
+-        bytes: Vec<u8>,
++        bytes: Arc<Vec<u8>>,
+     ) -> Result<(), Error> {
+         let clip = match uc.load_manager.get_loader(handle) {
+             Some(Self { target_clip, .. }) => *target_clip,
