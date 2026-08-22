@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 
@@ -366,7 +366,11 @@ pub fn main_func() {
     let navigator =
         NullNavigatorBackend::with_base_path(std::path::Path::new(BASE_PATH), &executor).unwrap();
 
-    let player = PlayerBuilder::new()
+    let player_builder = PlayerBuilder::new();
+    #[cfg(target_os = "vita")]
+    let player_builder = player_builder.with_max_execution_duration(Duration::MAX);
+
+    let player = player_builder
         .with_renderer(renderer)
         .with_audio(audio)
         .with_ui(ui_backend)
