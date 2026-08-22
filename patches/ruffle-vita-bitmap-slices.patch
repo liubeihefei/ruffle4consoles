@@ -397,7 +397,7 @@ index be263fbbb..d7c379d93 100644
 +    }
 +}
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
-index 767b1bb1c..1465747fb 100644
+index 767b1bb1c..c032b3ade 100644
 --- a/core/src/display_object/movie_clip.rs
 +++ b/core/src/display_object/movie_clip.rs
 @@ -14,7 +14,7 @@ use crate::backend::audio::{AudioManager, SoundInstanceHandle};
@@ -512,7 +512,39 @@ index 767b1bb1c..1465747fb 100644
                  width,
                  height,
              }),
-@@ -4448,6 +4475,12 @@ struct PreloadProgress {
+@@ -3645,12 +3672,13 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+         context: &mut UpdateContext<'gc>,
+         reader: &mut SwfStream<'a>,
+     ) -> Result<(), Error> {
+-        let font = reader.read_define_font_2(2)?;
++        let font = reader.read_define_font_2_lazy(2)?;
+         let font_id = font.id;
+-        let font_object = Font::from_swf_tag(
++        let font_object = Font::from_swf_tag_lazy(
+             context.gc(),
+             context.renderer,
+             font,
++            self.movie(),
+             reader.encoding(),
+             FontType::Embedded,
+         );
+@@ -3665,12 +3693,13 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+         context: &mut UpdateContext<'gc>,
+         reader: &mut SwfStream<'a>,
+     ) -> Result<(), Error> {
+-        let font = reader.read_define_font_2(3)?;
++        let font = reader.read_define_font_2_lazy(3)?;
+         let font_id = font.id;
+-        let font_object = Font::from_swf_tag(
++        let font_object = Font::from_swf_tag_lazy(
+             context.gc(),
+             context.renderer,
+             font,
++            self.movie(),
+             reader.encoding(),
+             FontType::Embedded,
+         );
+@@ -4448,6 +4477,12 @@ struct PreloadProgress {
      /// If this movie is currently executing an ImportAssets/2.
      /// If true, this movie should **not** execute, and should be considered as still loading.
      awaiting_import: Cell<bool>,
@@ -525,7 +557,7 @@ index 767b1bb1c..1465747fb 100644
  }
  
  impl Default for PreloadProgress {
-@@ -4459,6 +4492,8 @@ impl Default for PreloadProgress {
+@@ -4459,6 +4494,8 @@ impl Default for PreloadProgress {
              start_pos: Cell::new(0),
              cur_preload_symbol: Cell::new(None),
              awaiting_import: Cell::new(false),
@@ -534,7 +566,7 @@ index 767b1bb1c..1465747fb 100644
          }
      }
  }
-@@ -4516,6 +4551,21 @@ struct EagerTags {
+@@ -4516,6 +4553,21 @@ struct EagerTags {
  }
  
  impl<'gc> MovieClipShared<'gc> {
@@ -556,6 +588,164 @@ index 767b1bb1c..1465747fb 100644
      fn empty(movie: Arc<SwfMovie>) -> Self {
          let mut s = Self::with_data(0, SwfSlice::empty(movie), 1, None, None);
  
+diff --git a/core/src/font.rs b/core/src/font.rs
+index 65220682b..da8baa91a 100644
+--- a/core/src/font.rs
++++ b/core/src/font.rs
+@@ -2,6 +2,7 @@ use crate::drawing::Drawing;
+ use crate::html::TextSpan;
+ use crate::prelude::*;
+ use crate::string::WStr;
++use crate::tag_utils::{SwfMovie, SwfSlice};
+ use gc_arena::{Collect, Gc, Mutation};
+ use ruffle_render::backend::null::NullBitmapSource;
+ use ruffle_render::backend::{RenderBackend, ShapeHandle};
+@@ -560,6 +561,101 @@ impl<'gc> Font<'gc> {
+         ))
+     }
+ 
++    pub fn from_swf_tag_lazy(
++        gc_context: &Mutation<'gc>,
++        renderer: &mut dyn RenderBackend,
++        tag: swf::LazyFont<'_>,
++        movie: Arc<SwfMovie>,
++        encoding: &'static swf::Encoding,
++        font_type: FontType,
++    ) -> Font<'gc> {
++        let mut code_point_to_glyph = fnv::FnvHashMap::default();
++        let name = tag.name.to_string_lossy(encoding);
++        let descriptor = FontDescriptor::from_parts(
++            &name,
++            tag.flags.contains(swf::FontFlag::IS_BOLD),
++            tag.flags.contains(swf::FontFlag::IS_ITALIC),
++        );
++        let (ascent, descent, leading) = if let Some(layout) = &tag.layout {
++            (layout.ascent as i32, layout.descent as i32, layout.leading)
++        } else {
++            (0, 0, 0)
++        };
++        let deferred_shape_bytes = tag
++            .glyphs
++            .iter()
++            .map(|glyph| glyph.shape_data.len())
++            .sum::<usize>();
++        let glyph_count = tag.glyphs.len();
++        let font_id = tag.id;
++        let source = SwfSlice::from(movie);
++
++        let glyphs: Vec<Glyph> = tag
++            .glyphs
++            .into_iter()
++            .enumerate()
++            .map(|(index, swf_glyph)| {
++                let code = swf_glyph.code;
++                let character = char::from_u32(code as u32).unwrap_or(char::REPLACEMENT_CHARACTER);
++                code_point_to_glyph.insert(code, index);
++
++                let glyph = Glyph {
++                    advance: Twips::new(swf_glyph.advance.into()),
++                    shape: GlyphShape::Swf(Box::new(RefCell::new(SwfGlyphOrShape::LazyGlyph(
++                        source.to_subslice(swf_glyph.shape_data),
++                    )))),
++                    character,
++                };
++
++                // Preserve the existing preload behavior for commonly used ASCII glyphs.
++                if code < 128 {
++                    glyph.shape_handle(renderer);
++                }
++
++                glyph
++            })
++            .collect();
++
++        let kerning_pairs: fnv::FnvHashMap<(u16, u16), Twips> = if let Some(layout) = &tag.layout {
++            layout
++                .kerning
++                .iter()
++                .map(|kerning| ((kerning.left_code, kerning.right_code), kerning.adjustment))
++                .collect()
++        } else {
++            fnv::FnvHashMap::default()
++        };
++
++        tracing::info!(
++            font_id,
++            glyph_count,
++            deferred_shape_bytes,
++            "Deferred embedded font glyph outlines"
++        );
++
++        Font(Gc::new(
++            gc_context,
++            FontData {
++                glyphs: if glyphs.is_empty() {
++                    GlyphSource::Empty
++                } else {
++                    GlyphSource::Memory {
++                        glyphs,
++                        code_point_to_glyph,
++                        kerning_pairs,
++                    }
++                },
++                scale: if tag.version >= 3 { 20480.0 } else { 1024.0 },
++                ascent,
++                descent,
++                leading,
++                descriptor,
++                font_type,
++                has_layout: tag.layout.is_some(),
++            },
++        ))
++    }
++
+     pub fn from_font4_tag(
+         gc_context: &Mutation<'gc>,
+         tag: swf::Font4,
+@@ -894,6 +990,7 @@ pub trait FontLike<'gc> {
+ #[derive(Debug, Clone)]
+ enum SwfGlyphOrShape {
+     Glyph(swf::Glyph),
++    LazyGlyph(SwfSlice),
+     Shape {
+         shape: swf::Shape,
+         // Handle to registered shape, loaded lazily on first render of this glyph.
+@@ -904,13 +1001,28 @@ enum SwfGlyphOrShape {
+ 
+ impl SwfGlyphOrShape {
+     fn shape(&mut self) -> (&mut swf::Shape, &mut Option<ShapeHandle>) {
+-        if let Self::Glyph(_) = self {
+-            if let Self::Glyph(glyph) = core::mem::replace(self, Self::Poisoned) {
+-                *self = Self::Shape {
+-                    shape: ruffle_render::shape_utils::swf_glyph_to_shape(glyph),
+-                    handle: None,
+-                };
+-            }
++        if matches!(self, Self::Glyph(_) | Self::LazyGlyph(_)) {
++            let glyph = match core::mem::replace(self, Self::Poisoned) {
++                Self::Glyph(glyph) => glyph,
++                Self::LazyGlyph(data) => {
++                    let mut reader = data.read_from(0);
++                    let shape_records = reader.read_glyph_shape_records().unwrap_or_else(|error| {
++                        tracing::warn!(%error, "Failed to parse deferred font glyph outline");
++                        Vec::new()
++                    });
++                    swf::Glyph {
++                        shape_records,
++                        code: 0,
++                        advance: 0,
++                        bounds: None,
++                    }
++                }
++                _ => unreachable!(),
++            };
++            *self = Self::Shape {
++                shape: ruffle_render::shape_utils::swf_glyph_to_shape(glyph),
++                handle: None,
++            };
+         }
+ 
+         match self {
 diff --git a/core/src/loader.rs b/core/src/loader.rs
 index e8731abf5..a285046f1 100644
 --- a/core/src/loader.rs
@@ -578,3 +768,237 @@ index e8731abf5..a285046f1 100644
      ) -> Result<(), Error> {
          let clip = match uc.load_manager.get_loader(handle) {
              Some(Self { target_clip, .. }) => *target_clip,
+diff --git a/swf/src/read.rs b/swf/src/read.rs
+index d9d16cf26..dd925ec78 100644
+--- a/swf/src/read.rs
++++ b/swf/src/read.rs
+@@ -978,6 +978,34 @@ impl<'a> Reader<'a> {
+     }
+ 
+     pub fn read_define_font_2(&mut self, version: u8) -> Result<Font<'a>> {
++        let swf_version = self.version;
++        let font = self.read_define_font_2_lazy(version)?;
++        let glyphs = font
++            .glyphs
++            .into_iter()
++            .map(|glyph| {
++                let mut reader = Reader::new(glyph.shape_data, swf_version);
++                Ok(Glyph {
++                    shape_records: reader.read_glyph_shape_records()?,
++                    code: glyph.code,
++                    advance: glyph.advance,
++                    bounds: glyph.bounds,
++                })
++            })
++            .collect::<Result<Vec<_>>>()?;
++
++        Ok(Font {
++            version: font.version,
++            id: font.id,
++            name: font.name,
++            language: font.language,
++            layout: font.layout,
++            glyphs,
++            flags: font.flags,
++        })
++    }
++
++    pub fn read_define_font_2_lazy(&mut self, version: u8) -> Result<LazyFont<'a>> {
+         let id = self.read_character_id()?;
+         let flags = FontFlag::from_bits_truncate(self.read_u8()?);
+         let language = self.read_language()?;
+@@ -987,8 +1015,8 @@ impl<'a> Reader<'a> {
+ 
+         let num_glyphs = self.read_u16()? as usize;
+         let mut glyphs = vec![
+-            Glyph {
+-                shape_records: vec![],
++            LazyGlyph {
++                shape_data: &[],
+                 code: 0,
+                 advance: 0,
+                 bounds: None,
+@@ -1029,48 +1057,31 @@ impl<'a> Reader<'a> {
+                 self.read_u16()?.into()
+             };
+ 
+-            // GlyphShapeTable
++            let glyph_table_offset = self.pos(offsets_ref);
++            if offsets.first().copied().map(|offset| offset as usize) != Some(glyph_table_offset) {
++                return Err(Error::invalid_data("Invalid first font glyph offset"));
++            }
++
++            // GlyphShapeTable. Keep slices into the tag stream so callers can
++            // defer expanding bit-packed outlines into ShapeRecords.
+             for (i, glyph) in glyphs.iter_mut().enumerate() {
+-                // The glyph shapes are assumed to be positioned per the offset table.
+-                // Panic on debug builds if this assumption is wrong, maybe we need to
+-                // seek into these offsets instead?
+-                debug_assert_eq!(self.pos(offsets_ref), offsets[i] as usize);
+-
+-                // The glyph shapes must not overlap. Avoid exceeding to the next one.
+-                // TODO: What happens on decreasing offsets?
+-                let available_bytes = if i < num_glyphs - 1 {
+-                    offsets[i + 1] - offsets[i]
++                let start = offsets[i] as usize;
++                let end = if i < num_glyphs - 1 {
++                    offsets[i + 1] as usize
+                 } else {
+-                    code_table_offset - offsets[i]
++                    code_table_offset as usize
+                 };
+-
+-                if available_bytes == 0 {
+-                    continue;
+-                }
+-
+-                let num_bits = self.read_u8()?;
+-                let mut shape_context = ShapeContext {
+-                    swf_version: self.version,
+-                    shape_version: 1,
+-                    num_fill_bits: num_bits >> 4,
+-                    num_line_bits: num_bits & 0b1111,
+-                };
+-
+-                if available_bytes == 1 {
+-                    continue;
+-                }
+-
+-                // TODO: Avoid reading more than `available_bytes - 1`?
+-                let mut bits = self.bits();
+-                while let Some(record) = Self::read_shape_record(&mut bits, &mut shape_context)? {
+-                    glyph.shape_records.push(record);
+-                }
++                glyph.shape_data = offsets_ref
++                    .get(start..end)
++                    .ok_or_else(|| Error::invalid_data("Invalid font glyph offset"))?;
+             }
+ 
+-            // The code table is assumed to be positioned right after the glyph shapes.
+-            // Panic on debug builds if this assumption is wrong, maybe we need to seek
+-            // into the code table offset instead?
+-            debug_assert_eq!(self.pos(offsets_ref), code_table_offset as usize);
++            let current_offset = self.pos(offsets_ref);
++            let code_table_offset = code_table_offset as usize;
++            if current_offset > code_table_offset {
++                return Err(Error::invalid_data("Invalid font code table offset"));
++            }
++            self.read_slice(code_table_offset - current_offset)?;
+ 
+             // CodeTable
+             for glyph in &mut glyphs {
+@@ -1122,7 +1133,7 @@ impl<'a> Reader<'a> {
+             None
+         };
+ 
+-        Ok(Font {
++        Ok(LazyFont {
+             version,
+             id,
+             name,
+@@ -1133,6 +1144,30 @@ impl<'a> Reader<'a> {
+         })
+     }
+ 
++    pub fn read_glyph_shape_records(&mut self) -> Result<Vec<ShapeRecord>> {
++        if self.as_slice().is_empty() {
++            return Ok(Vec::new());
++        }
++
++        let num_bits = self.read_u8()?;
++        if self.as_slice().is_empty() {
++            return Ok(Vec::new());
++        }
++
++        let mut shape_context = ShapeContext {
++            swf_version: self.version,
++            shape_version: 1,
++            num_fill_bits: num_bits >> 4,
++            num_line_bits: num_bits & 0b1111,
++        };
++        let mut records = Vec::new();
++        let mut bits = self.bits();
++        while let Some(record) = Self::read_shape_record(&mut bits, &mut shape_context)? {
++            records.push(record);
++        }
++        Ok(records)
++    }
++
+     pub fn read_define_font_4(&mut self) -> Result<Font4<'a>> {
+         let id = self.read_character_id()?;
+         let flags = self.read_u8()?;
+@@ -2935,6 +2970,44 @@ pub mod tests {
+         }
+     }
+ 
++    #[test]
++    fn lazy_font_glyphs_match_eager_parser() {
++        for (path, tag_code, font_version) in [
++            ("tests/swfs/DefineFont2-CS6.swf", TagCode::DefineFont2, 2),
++            ("tests/swfs/DefineFont3-CS6.swf", TagCode::DefineFont3, 3),
++        ] {
++            let tag = read_tag_bytes_from_file(path, tag_code);
++            let mut tag_reader = reader(&tag);
++            let (_, tag_len) = tag_reader.read_tag_code_and_length().unwrap();
++            let tag_data = tag_reader.read_slice(tag_len).unwrap();
++
++            let eager = reader(tag_data).read_define_font_2(font_version).unwrap();
++            let lazy = reader(tag_data)
++                .read_define_font_2_lazy(font_version)
++                .unwrap();
++
++            assert_eq!(eager.version, lazy.version);
++            assert_eq!(eager.id, lazy.id);
++            assert_eq!(eager.name, lazy.name);
++            assert_eq!(eager.language, lazy.language);
++            assert_eq!(eager.layout, lazy.layout);
++            assert_eq!(eager.flags, lazy.flags);
++            assert_eq!(eager.glyphs.len(), lazy.glyphs.len());
++
++            for (eager_glyph, lazy_glyph) in eager.glyphs.iter().zip(&lazy.glyphs) {
++                assert_eq!(eager_glyph.code, lazy_glyph.code);
++                assert_eq!(eager_glyph.advance, lazy_glyph.advance);
++                assert_eq!(eager_glyph.bounds, lazy_glyph.bounds);
++                assert_eq!(
++                    eager_glyph.shape_records,
++                    reader(lazy_glyph.shape_data)
++                        .read_glyph_shape_records()
++                        .unwrap()
++                );
++            }
++        }
++    }
++
+     #[test]
+     fn read_shape_styles() {}
+ 
+diff --git a/swf/src/types.rs b/swf/src/types.rs
+index 913ed23ad..9d6d2cf4e 100644
+--- a/swf/src/types.rs
++++ b/swf/src/types.rs
+@@ -1190,6 +1190,25 @@ pub struct Font<'a> {
+     pub flags: FontFlag,
+ }
+ 
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct LazyFont<'a> {
++    pub version: u8,
++    pub id: CharacterId,
++    pub name: &'a SwfStr,
++    pub language: Language,
++    pub layout: Option<FontLayout>,
++    pub glyphs: Vec<LazyGlyph<'a>>,
++    pub flags: FontFlag,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct LazyGlyph<'a> {
++    pub shape_data: &'a [u8],
++    pub code: u16,
++    pub advance: u16,
++    pub bounds: Option<Rectangle<Twips>>,
++}
++
+ bitflags! {
+     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+     pub struct FontFlag: u8 {
