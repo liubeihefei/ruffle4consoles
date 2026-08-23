@@ -1,0 +1,253 @@
+diff --git a/core/src/avm2/globals/flash/display/bitmap_data.rs b/core/src/avm2/globals/flash/display/bitmap_data.rs
+index d4bedca6b..cae7bcdd9 100644
+--- a/core/src/avm2/globals/flash/display/bitmap_data.rs
++++ b/core/src/avm2/globals/flash/display/bitmap_data.rs
+@@ -125,6 +125,21 @@ pub fn init<'gc>(
+         let transparency = args.get_bool(2);
+         let fill_color = args.get_u32(3);
+ 
++        #[cfg(target_os = "vita")]
++        let pixel_bytes = width as usize * height as usize * 4;
++        #[cfg(target_os = "vita")]
++        if pixel_bytes >= 64 * 1024 {
++            tracing::info!(
++                target: "ruffle_core::bitmap",
++                "VITA_BITMAP_CTOR_BEGIN class={:?} size={}x{} bytes={} transparent={}",
++                name,
++                width,
++                height,
++                pixel_bytes,
++                transparency,
++            );
++        }
++
+         if !is_size_valid(activation.context.root_swf.version(), width, height) {
+             return Err(Error::avm_error(argument_error(
+                 activation,
+@@ -133,13 +148,27 @@ pub fn init<'gc>(
+             )?));
+         }
+ 
+-        BitmapData::new(
++        let bitmap_data = BitmapData::new(
+             activation.context.gc_context,
+             width,
+             height,
+             transparency,
+             fill_color,
+-        )
++        );
++
++        #[cfg(target_os = "vita")]
++        if pixel_bytes >= 64 * 1024 {
++            tracing::info!(
++                target: "ruffle_core::bitmap",
++                "VITA_BITMAP_CTOR_OK class={:?} size={}x{} bytes={}",
++                name,
++                width,
++                height,
++                pixel_bytes,
++            );
++        }
++
++        bitmap_data
+     };
+ 
+     new_bitmap_data.init_object2(activation.gc(), bitmap_data_obj);
+diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
+index 268e3c6de..4568c51aa 100644
+--- a/core/src/bitmap/bitmap_data.rs
++++ b/core/src/bitmap/bitmap_data.rs
+@@ -12,6 +12,8 @@ use ruffle_wstr::WStr;
+ use std::cell::Ref;
+ use std::fmt::Debug;
+ use std::ops::Range;
++#[cfg(target_os = "vita")]
++use std::sync::atomic::{AtomicU32, Ordering};
+ use swf::{Rectangle, Twips};
+ use tracing::instrument;
+ 
+@@ -62,6 +64,12 @@ pub enum BitmapDataDrawError {
+     Unimplemented,
+ }
+ 
++#[cfg(target_os = "vita")]
++static NEXT_BITMAP_DEBUG_ID: AtomicU32 = AtomicU32::new(1);
++
++#[cfg(target_os = "vita")]
++const BITMAP_LOG_THRESHOLD_BYTES: usize = 64 * 1024;
++
+ impl Color {
+     #[must_use]
+     pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+@@ -385,6 +393,9 @@ pub struct BitmapRawData<'gc> {
+     // so we need a separate 'disposed' flag.
+     disposed: bool,
+ 
++    #[cfg(target_os = "vita")]
++    debug_id: u32,
++
+     /// The bitmap handle for this data.
+     ///
+     /// This is lazily initialized; a value of `None` indicates that
+@@ -487,6 +498,8 @@ mod wrapper {
+                     height: 0,
+                     transparency: false,
+                     disposed: true,
++                    #[cfg(target_os = "vita")]
++                    debug_id: 0,
+                     bitmap_handle: None,
+                     avm2_object: None,
+                     display_objects: vec![],
+@@ -504,12 +517,46 @@ mod wrapper {
+             // Sync from the GPU to CPU, since our new BitmapData starts out
+             // with no GPU texture
+             let data = self.sync(renderer).borrow();
++            #[cfg(target_os = "vita")]
++            let debug_id = super::NEXT_BITMAP_DEBUG_ID
++                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            #[cfg(target_os = "vita")]
++            let pixel_bytes = data.pixels.len() * std::mem::size_of::<super::Color>();
++            #[cfg(target_os = "vita")]
++            if pixel_bytes >= super::BITMAP_LOG_THRESHOLD_BYTES {
++                tracing::info!(
++                    target: "ruffle_core::bitmap",
++                    "VITA_BITMAP_ALLOC_BEGIN id={} kind=clone size={}x{} bytes={} transparent={}",
++                    debug_id,
++                    data.width,
++                    data.height,
++                    pixel_bytes,
++                    data.transparency,
++                );
++            }
++
++            let pixels = data.pixels.clone();
++
++            #[cfg(target_os = "vita")]
++            if pixel_bytes >= super::BITMAP_LOG_THRESHOLD_BYTES {
++                tracing::info!(
++                    target: "ruffle_core::bitmap",
++                    "VITA_BITMAP_ALLOC_OK id={} kind=clone size={}x{} bytes={}",
++                    debug_id,
++                    data.width,
++                    data.height,
++                    pixel_bytes,
++                );
++            }
++
+             BitmapRawData {
+-                pixels: data.pixels.clone(),
++                pixels,
+                 width: data.width,
+                 height: data.height,
+                 transparency: data.transparency,
+                 disposed: data.disposed,
++                #[cfg(target_os = "vita")]
++                debug_id,
+                 bitmap_handle: None,
+                 avm2_object: None,
+                 display_objects: vec![],
+@@ -772,15 +819,48 @@ impl std::fmt::Debug for BitmapRawData<'_> {
+ 
+ impl<'gc> BitmapRawData<'gc> {
+     pub fn new(width: u32, height: u32, transparency: bool, fill_color: u32) -> Self {
++        #[cfg(target_os = "vita")]
++        let debug_id = NEXT_BITMAP_DEBUG_ID.fetch_add(1, Ordering::Relaxed);
++        #[cfg(target_os = "vita")]
++        let pixel_bytes = width as usize * height as usize * std::mem::size_of::<Color>();
++        #[cfg(target_os = "vita")]
++        if pixel_bytes >= BITMAP_LOG_THRESHOLD_BYTES {
++            tracing::info!(
++                target: "ruffle_core::bitmap",
++                "VITA_BITMAP_ALLOC_BEGIN id={} kind=fill size={}x{} bytes={} transparent={}",
++                debug_id,
++                width,
++                height,
++                pixel_bytes,
++                transparency,
++            );
++        }
++
++        let pixels = vec![
++            Color::bgra_u32(fill_color).to_premultiplied_alpha(transparency);
++            width as usize * height as usize
++        ];
++
++        #[cfg(target_os = "vita")]
++        if pixel_bytes >= BITMAP_LOG_THRESHOLD_BYTES {
++            tracing::info!(
++                target: "ruffle_core::bitmap",
++                "VITA_BITMAP_ALLOC_OK id={} kind=fill size={}x{} bytes={}",
++                debug_id,
++                width,
++                height,
++                pixel_bytes,
++            );
++        }
++
+         Self {
+-            pixels: vec![
+-                Color::bgra_u32(fill_color).to_premultiplied_alpha(transparency);
+-                width as usize * height as usize
+-            ],
++            pixels,
+             width,
+             height,
+             transparency,
+             disposed: false,
++            #[cfg(target_os = "vita")]
++            debug_id,
+             bitmap_handle: None,
+             avm2_object: None,
+             display_objects: vec![],
+@@ -796,11 +876,30 @@ impl<'gc> BitmapRawData<'gc> {
+         transparency: bool,
+         pixels: Vec<Color>,
+     ) -> Self {
++        #[cfg(target_os = "vita")]
++        let debug_id = NEXT_BITMAP_DEBUG_ID.fetch_add(1, Ordering::Relaxed);
++        #[cfg(target_os = "vita")]
++        let pixel_bytes = pixels.len() * std::mem::size_of::<Color>();
++        #[cfg(target_os = "vita")]
++        if pixel_bytes >= BITMAP_LOG_THRESHOLD_BYTES {
++            tracing::info!(
++                target: "ruffle_core::bitmap",
++                "VITA_BITMAP_ADOPT id={} size={}x{} bytes={} transparent={}",
++                debug_id,
++                width,
++                height,
++                pixel_bytes,
++                transparency,
++            );
++        }
++
+         Self {
+             pixels,
+             width,
+             height,
+             transparency,
++            #[cfg(target_os = "vita")]
++            debug_id,
+             bitmap_handle: None,
+             avm2_object: None,
+             disposed: false,
+@@ -816,6 +915,19 @@ impl<'gc> BitmapRawData<'gc> {
+     }
+ 
+     pub fn dispose(&mut self) {
++        #[cfg(target_os = "vita")]
++        let pixel_bytes = self.pixels.len() * std::mem::size_of::<Color>();
++        #[cfg(target_os = "vita")]
++        if pixel_bytes >= BITMAP_LOG_THRESHOLD_BYTES {
++            tracing::info!(
++                target: "ruffle_core::bitmap",
++                "VITA_BITMAP_DISPOSE id={} size={}x{} bytes={}",
++                self.debug_id,
++                self.width,
++                self.height,
++                pixel_bytes,
++            );
++        }
+         self.width = 0;
+         self.height = 0;
+         self.pixels = Vec::new(); // free the CPU pixel buffer
