@@ -1,0 +1,25 @@
+diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
+index 841fdd7..1d8ab52 100644
+--- a/core/src/bitmap/bitmap_data.rs
++++ b/core/src/bitmap/bitmap_data.rs
+@@ -68,7 +68,10 @@ static NEXT_BITMAP_DEBUG_ID: AtomicU32 = AtomicU32::new(1);
+ 
+ #[cfg(target_os = "vita")]
+-const BITMAP_LOG_THRESHOLD_BYTES: usize = 64 * 1024;
++const BITMAP_LOG_THRESHOLD_BYTES: usize = 48 * 1024;
++
++#[cfg(target_os = "vita")]
++const BITMAP_CPU_DROP_MIN_BYTES: usize = 4 * 1024;
+ 
+ impl Color {
+     #[must_use]
+     pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+@@ -1110,7 +1113,7 @@ impl<'gc> BitmapRawData<'gc> {
+     #[cfg(target_os = "vita")]
+     fn discard_uniform_cpu_pixels(&mut self) {
+         let pixel_bytes = self.pixels.len() * std::mem::size_of::<Color>();
+-        if pixel_bytes < BITMAP_LOG_THRESHOLD_BYTES || self.discarded_cpu_fill.is_some() {
++        if pixel_bytes < BITMAP_CPU_DROP_MIN_BYTES || self.discarded_cpu_fill.is_some() {
+             return;
+         }
+ 
