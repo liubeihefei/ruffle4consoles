@@ -21,6 +21,8 @@ jobs:
                 git -C ruffle-vita-core apply ../patches/ruffle-vita-bitmap-slices.patch
                 git -C ruffle-vita-core apply --check ../patches/ruffle-vita-bitmap-lifecycle.patch
                 git -C ruffle-vita-core apply ../patches/ruffle-vita-bitmap-lifecycle.patch
+                git -C ruffle-vita-core apply --check ../patches/ruffle-vita-bitmap-gpu-authoritative.patch
+                git -C ruffle-vita-core apply ../patches/ruffle-vita-bitmap-gpu-authoritative.patch
                 sed -i 's#ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d",#ruffle_core = { path = "ruffle-vita-core/core",#' Cargo.toml
                 sed -i 's#ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d" }#ruffle_render = { path = "ruffle-vita-core/render" }#' Cargo.toml
                 sed -i 's#ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d", features = \["tessellator"\] }#ruffle_render = { path = "../ruffle-vita-core/render", features = ["tessellator"] }#' ruffle_render_glow/Cargo.toml

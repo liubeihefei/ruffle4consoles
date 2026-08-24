@@ -1,0 +1,217 @@
+diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
+index 00759d3..841fdd7 100644
+--- a/core/src/bitmap/bitmap_data.rs
++++ b/core/src/bitmap/bitmap_data.rs
+@@ -299,6 +299,13 @@ impl<'gc> BitmapData<'gc> {
+         self.0.overwrite_cpu_pixels_from_gpu(mc)
+     }
+ 
++    pub fn prepare_gpu_draw(
++        &self,
++        mc: &Mutation<'gc>,
++    ) -> (GcRefLock<'gc, BitmapRawData<'gc>>, Option<PixelRegion>) {
++        self.0.prepare_gpu_draw(mc)
++    }
++
+     pub fn read_area(
+         &self,
+         read_area: PixelRegion,
+@@ -396,6 +403,12 @@ pub struct BitmapRawData<'gc> {
+     #[cfg(target_os = "vita")]
+     debug_id: u32,
+ 
++    /// A uniform CPU buffer dropped after a GPU draw. CPU access restores it
++    /// before applying the GPU-modified region.
++    #[cfg(target_os = "vita")]
++    #[collect(require_static)]
++    discarded_cpu_fill: Option<Color>,
++
+     /// The bitmap handle for this data.
+     ///
+     /// This is lazily initialized; a value of `None` indicates that
+@@ -500,6 +513,8 @@ mod wrapper {
+                     disposed: true,
+                     #[cfg(target_os = "vita")]
+                     debug_id: 0,
++                    #[cfg(target_os = "vita")]
++                    discarded_cpu_fill: None,
+                     bitmap_handle: None,
+                     avm2_object: None,
+                     display_objects: vec![],
+@@ -557,6 +572,8 @@ mod wrapper {
+                 disposed: data.disposed,
+                 #[cfg(target_os = "vita")]
+                 debug_id,
++                #[cfg(target_os = "vita")]
++                discarded_cpu_fill: None,
+                 bitmap_handle: None,
+                 avm2_object: None,
+                 display_objects: vec![],
+@@ -579,6 +596,9 @@ mod wrapper {
+                 .borrow_mut();
+             match std::mem::replace(&mut write.dirty_state, DirtyState::Clean) {
+                 DirtyState::GpuModified(sync_handle, bounds) => {
++                    #[cfg(target_os = "vita")]
++                    write.restore_discarded_cpu_pixels();
++
+                     let mut sync_handle = Some(sync_handle);
+                     let stride = write.width() * 4;
+                     let resolved_into_existing = renderer
+@@ -650,6 +670,18 @@ mod wrapper {
+         pub fn overwrite_cpu_pixels_from_gpu(
+             &self,
+             mc: &Mutation<'gc>,
++        ) -> (GcRefLock<'gc, BitmapRawData<'gc>>, Option<PixelRegion>) {
++            let result = self.prepare_gpu_draw(mc);
++            #[cfg(target_os = "vita")]
++            result.0.borrow_mut(mc).restore_discarded_cpu_pixels();
++            result
++        }
++
++        /// Cancels a pending GPU-to-CPU sync before another GPU draw without
++        /// materializing a CPU buffer that the draw itself will not read.
++        pub fn prepare_gpu_draw(
++            &self,
++            mc: &Mutation<'gc>,
+         ) -> (GcRefLock<'gc, BitmapRawData<'gc>>, Option<PixelRegion>) {
+             let mut write = self.0.borrow_mut(mc);
+             let dirty_rect = match write.dirty_state {
+@@ -670,12 +702,16 @@ mod wrapper {
+             read_area: PixelRegion,
+             renderer: &mut dyn RenderBackend,
+         ) -> Ref<'_, BitmapRawData<'gc>> {
++            #[cfg(target_os = "vita")]
++            let cpu_pixels_discarded = self.0.borrow().discarded_cpu_fill.is_some();
+             let needs_update = if let DirtyState::GpuModified(_, area) = self.0.borrow().dirty_state
+             {
+                 area.intersects(read_area)
+             } else {
+                 false
+             };
++            #[cfg(target_os = "vita")]
++            let needs_update = needs_update || cpu_pixels_discarded;
+             if needs_update {
+                 self.sync(renderer);
+             }
+@@ -772,6 +808,11 @@ mod wrapper {
+         }
+ 
+         pub fn can_read(&self, read_area: PixelRegion) -> bool {
++            #[cfg(target_os = "vita")]
++            if self.0.borrow().discarded_cpu_fill.is_some() {
++                return false;
++            }
++
+             if let DirtyState::GpuModified(_, area) = self.0.borrow().dirty_state {
+                 !area.intersects(read_area)
+             } else {
+@@ -861,6 +893,8 @@ impl<'gc> BitmapRawData<'gc> {
+             disposed: false,
+             #[cfg(target_os = "vita")]
+             debug_id,
++            #[cfg(target_os = "vita")]
++            discarded_cpu_fill: None,
+             bitmap_handle: None,
+             avm2_object: None,
+             display_objects: vec![],
+@@ -900,6 +934,8 @@ impl<'gc> BitmapRawData<'gc> {
+             transparency,
+             #[cfg(target_os = "vita")]
+             debug_id,
++            #[cfg(target_os = "vita")]
++            discarded_cpu_fill: None,
+             bitmap_handle: None,
+             avm2_object: None,
+             disposed: false,
+@@ -931,6 +967,10 @@ impl<'gc> BitmapRawData<'gc> {
+         self.width = 0;
+         self.height = 0;
+         self.pixels = Vec::new(); // free the CPU pixel buffer
++        #[cfg(target_os = "vita")]
++        {
++            self.discarded_cpu_fill = None;
++        }
+         self.bitmap_handle = None;
+         // There's no longer a handle to update
+         self.dirty_state = DirtyState::Clean;
+@@ -978,6 +1018,9 @@ impl<'gc> BitmapRawData<'gc> {
+         sync_handle: Box<dyn SyncHandle>,
+         region: PixelRegion,
+     ) {
++        #[cfg(target_os = "vita")]
++        self.discard_uniform_cpu_pixels();
++
+         self.dirty_state = DirtyState::GpuModified(sync_handle, region);
+         self.inform_display_objects(gc_context);
+     }
+@@ -1061,6 +1104,57 @@ impl<'gc> BitmapRawData<'gc> {
+         &self.pixels
+     }
+ 
++    #[cfg(target_os = "vita")]
++    fn discard_uniform_cpu_pixels(&mut self) {
++        let pixel_bytes = self.pixels.len() * std::mem::size_of::<Color>();
++        if pixel_bytes < BITMAP_LOG_THRESHOLD_BYTES || self.discarded_cpu_fill.is_some() {
++            return;
++        }
++
++        let Some(fill) = self.pixels.first().copied() else {
++            return;
++        };
++        if self.pixels.iter().any(|pixel| *pixel != fill) {
++            return;
++        }
++
++        self.pixels = Vec::new();
++        self.discarded_cpu_fill = Some(fill);
++        tracing::info!(
++            target: "ruffle_core::bitmap",
++            "VITA_BITMAP_CPU_DROP id={} size={}x{} bytes={}",
++            self.debug_id,
++            self.width,
++            self.height,
++            pixel_bytes,
++        );
++    }
++
++    #[cfg(target_os = "vita")]
++    fn restore_discarded_cpu_pixels(&mut self) {
++        let Some(fill) = self.discarded_cpu_fill.take() else {
++            return;
++        };
++        let pixel_bytes = self.width as usize * self.height as usize * std::mem::size_of::<Color>();
++        tracing::info!(
++            target: "ruffle_core::bitmap",
++            "VITA_BITMAP_CPU_RESTORE_BEGIN id={} size={}x{} bytes={}",
++            self.debug_id,
++            self.width,
++            self.height,
++            pixel_bytes,
++        );
++        self.pixels = vec![fill; self.width as usize * self.height as usize];
++        tracing::info!(
++            target: "ruffle_core::bitmap",
++            "VITA_BITMAP_CPU_RESTORE_OK id={} size={}x{} bytes={}",
++            self.debug_id,
++            self.width,
++            self.height,
++            pixel_bytes,
++        );
++    }
++
+     // Updates the data stored with our `BitmapHandle` if this `BitmapRawData`
+     // is dirty
+     pub fn update_dirty_texture(&mut self, renderer: &mut dyn RenderBackend) {
+diff --git a/core/src/bitmap/operations.rs b/core/src/bitmap/operations.rs
+index 017f581..3005347 100644
+--- a/core/src/bitmap/operations.rs
++++ b/core/src/bitmap/operations.rs
+@@ -1605,7 +1605,7 @@ pub fn draw<'gc>(
+         commands
+     };
+ 
+-    let (target, include_dirty_area) = target.overwrite_cpu_pixels_from_gpu(context.gc());
++    let (target, include_dirty_area) = target.prepare_gpu_draw(context.gc());
+     let mut write = target.borrow_mut(context.gc());
+     // If we have another dirty area to preserve, expand this to include it
+     if let Some(old) = include_dirty_area {
