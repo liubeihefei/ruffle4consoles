@@ -62,3 +62,6 @@ opt-level = 3
 strip = "none"
 lto = true
 panic = "abort"
+
+[patch.crates-io]
+jpeg-decoder = { path = "vendor/jpeg-decoder" }

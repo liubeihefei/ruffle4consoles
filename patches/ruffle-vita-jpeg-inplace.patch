@@ -1,0 +1,87 @@
+diff --git a/render/src/utils.rs b/render/src/utils.rs
+index afa22f44f..bd6439dff 100644
+--- a/render/src/utils.rs
++++ b/render/src/utils.rs
+@@ -191,9 +191,44 @@ fn decode_jpeg(jpeg_data: &[u8], alpha_data: Option<&[u8]>) -> Result<Bitmap<'st
+         .info()
+         .expect("info() should always return Some if read_info returned Ok");
+     validate_size(metadata.width, metadata.height)?;
++
++    #[cfg(target_os = "vita")]
++    let vita_in_place = metadata.pixel_format == jpeg_decoder::PixelFormat::RGB24
++        && alpha_data.is_some()
++        && metadata.width as usize * metadata.height as usize * 4 >= 4 * 1024 * 1024;
++
++    #[cfg(target_os = "vita")]
++    let decoded_data = if vita_in_place {
++        let pixels = metadata.width as usize * metadata.height as usize;
++        let rgb_bytes = pixels * 3;
++        let rgba_bytes = pixels * 4;
++        tracing::info!(
++            "VITA_JPEG_INPLACE_BEGIN size={}x{} rgb_bytes={} rgba_capacity={} alpha_compressed_bytes={}",
++            metadata.width,
++            metadata.height,
++            rgb_bytes,
++            rgba_bytes,
++            alpha_data.map_or(0, <[u8]>::len),
++        );
++        let mut output = Vec::with_capacity(rgba_bytes);
++        output.resize(rgb_bytes, 0);
++        decoder.decode_into(&mut output)?;
++        tracing::info!(
++            "VITA_JPEG_INPLACE_RGB_OK size={}x{} rgb_bytes={} rgba_capacity={}",
++            metadata.width,
++            metadata.height,
++            rgb_bytes,
++            output.capacity(),
++        );
++        output
++    } else {
++        decoder.decode()?
++    };
++
++    #[cfg(not(target_os = "vita"))]
+     let decoded_data = decoder.decode()?;
+-
++
+-    let decoded_data = match metadata.pixel_format {
++    let mut decoded_data = match metadata.pixel_format {
+         jpeg_decoder::PixelFormat::RGB24 => decoded_data,
+         jpeg_decoder::PixelFormat::CMYK32 => decoded_data
+             .chunks_exact(4)
+@@ -221,6 +256,34 @@ fn decode_jpeg(jpeg_data: &[u8], alpha_data: Option<&[u8]>) -> Result<Bitmap<'st
+         let alpha_data = decompress_zlib(alpha_data)?;
+-
++
+         if alpha_data.len() == decoded_data.len() / 3 {
++            #[cfg(target_os = "vita")]
++            if vita_in_place {
++                let pixels = alpha_data.len();
++                decoded_data.resize(pixels * 4, 0);
++                for pixel in (0..pixels).rev() {
++                    let rgb = pixel * 3;
++                    let rgba = pixel * 4;
++                    let a = alpha_data[pixel];
++                    let r = decoded_data[rgb].min(a);
++                    let g = decoded_data[rgb + 1].min(a);
++                    let b = decoded_data[rgb + 2].min(a);
++                    decoded_data[rgba..rgba + 4].copy_from_slice(&[r, g, b, a]);
++                }
++                tracing::info!(
++                    "VITA_JPEG_INPLACE_RGBA_OK size={}x{} rgba_bytes={} alpha_bytes={}",
++                    metadata.width,
++                    metadata.height,
++                    decoded_data.len(),
++                    alpha_data.len(),
++                );
++                return Ok(Bitmap::new(
++                    metadata.width.into(),
++                    metadata.height.into(),
++                    BitmapFormat::Rgba,
++                    decoded_data,
++                ));
++            }
++
+             let rgba: Vec<_> = decoded_data
+                 .chunks_exact(3)
+                 .zip(alpha_data)
