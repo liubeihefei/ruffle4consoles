@@ -321,3 +321,44 @@ index 7fad8da78..c055fe5f8 100644
 +                .collect(),
 +        )
 +    };
+diff --git "a/core/src/avm2/globals/flash/display/bitmap_data.rs" "b/core/src/avm2/globals/flash/display/bitmap_data.rs"
+index cae7bcd42..6c405e8f4 100644
+--- "a/core/src/avm2/globals/flash/display/bitmap_data.rs"
++++ "b/core/src/avm2/globals/flash/display/bitmap_data.rs"
+@@ -72,11 +72,25 @@ pub fn fill_bitmap_data_from_symbol<'gc>(
+-    let bitmap = bd.decode().expect("Failed to decode BitmapData");
+-    BitmapData::new_with_pixels(
+-        activation.context.gc_context,
+-        bitmap.width(),
+-        bitmap.height(),
+-        true,
+-        bitmap
+-            .as_colors()
+-            .map(crate::bitmap::bitmap_data::Color::from)
+-            .collect(),
+-    )
++    #[cfg(target_os = "vita")]
++    {
++        let size = bd.size();
++        BitmapData::new_with_compressed_bitmap(
++            activation.context.gc_context,
++            u32::from(size.width),
++            u32::from(size.height),
++            true,
++            bd.clone(),
++        )
++    }
++    #[cfg(not(target_os = "vita"))]
++    {
++        let bitmap = bd.decode().expect("Failed to decode BitmapData");
++        BitmapData::new_with_pixels(
++            activation.context.gc_context,
++            bitmap.width(),
++            bitmap.height(),
++            true,
++            bitmap
++                .as_colors()
++                .map(crate::bitmap::bitmap_data::Color::from)
++                .collect(),
++        )
++    }
