@@ -86,18 +86,6 @@ jobs:
                 fi
                 exit "$status"
 
-            - name: Export VPK for local deployment
-              if: success() && github.ref == 'refs/heads/progress8-sparse-bitmap'
-              shell: bash
-              run: |
-                git config user.name "codex-build"
-                git config user.email "codex-build@users.noreply.github.com"
-                mkdir -p .codex-artifacts
-                cp target/armv7-sony-vita-newlibeabihf/vita/ruffle4consoles.vpk .codex-artifacts/ruffle4consoles-${GITHUB_SHA}.vpk
-                git add .codex-artifacts
-                git commit -m "[skip ci] export Vita artifact ${GITHUB_SHA}" || true
-                git push origin "HEAD:refs/heads/codex-vita-artifact-${GITHUB_SHA}"
-
             - uses: actions/upload-artifact@v7
               with:
                 name: vita
