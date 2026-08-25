@@ -26,6 +26,8 @@ use ruffle_render::transform::Transform;
 use std::any::Any;
 use std::borrow::Cow;
 use std::sync::Arc;
+#[cfg(target_os = "vita")]
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use swf::{BlendMode, Color, Twips};
 use thiserror::Error;
 
@@ -159,10 +161,74 @@ struct RegistryData {
     width: u32,
     height: u32,
     texture: glow::Texture,
+    #[cfg(target_os = "vita")]
+    debug_id: u32,
+    #[cfg(target_os = "vita")]
+    logical_bytes: usize,
+}
+
+#[cfg(target_os = "vita")]
+static NEXT_TEXTURE_DEBUG_ID: AtomicU32 = AtomicU32::new(1);
+#[cfg(target_os = "vita")]
+static LIVE_TEXTURE_LOGICAL_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+impl RegistryData {
+    fn new(
+        gl: Arc<glow::Context>,
+        width: u32,
+        height: u32,
+        texture: glow::Texture,
+        bytes_per_pixel: usize,
+        origin: &'static str,
+    ) -> Self {
+        #[cfg(not(target_os = "vita"))]
+        let _ = (bytes_per_pixel, origin);
+        #[cfg(target_os = "vita")]
+        let debug_id = NEXT_TEXTURE_DEBUG_ID.fetch_add(1, Ordering::Relaxed);
+        #[cfg(target_os = "vita")]
+        let logical_bytes = width as usize * height as usize * bytes_per_pixel;
+        #[cfg(target_os = "vita")]
+        let live_bytes = LIVE_TEXTURE_LOGICAL_BYTES.fetch_add(logical_bytes, Ordering::Relaxed)
+            + logical_bytes;
+        #[cfg(target_os = "vita")]
+        log::info!(
+            "VITA_GPU_TEXTURE_ALLOC id={} origin={} size={}x{} bytes={} live_bytes={}",
+            debug_id,
+            origin,
+            width,
+            height,
+            logical_bytes,
+            live_bytes,
+        );
+        Self {
+            gl,
+            width,
+            height,
+            texture,
+            #[cfg(target_os = "vita")]
+            debug_id,
+            #[cfg(target_os = "vita")]
+            logical_bytes,
+        }
+    }
 }
 
 impl Drop for RegistryData {
     fn drop(&mut self) {
+        #[cfg(target_os = "vita")]
+        {
+            let live_bytes = LIVE_TEXTURE_LOGICAL_BYTES
+                .fetch_sub(self.logical_bytes, Ordering::Relaxed)
+                - self.logical_bytes;
+            log::info!(
+                "VITA_GPU_TEXTURE_DROP id={} size={}x{} bytes={} live_bytes={}",
+                self.debug_id,
+                self.width,
+                self.height,
+                self.logical_bytes,
+                live_bytes,
+            );
+        }
         unsafe {
             self.gl.delete_texture(self.texture);
         }
@@ -1202,12 +1268,15 @@ impl RenderBackend for GlowRenderBackend {
                 glow::LINEAR as i32,
             );
 
-            Ok(BitmapHandle(Arc::new(RegistryData {
-                gl: self.gl.clone(),
-                width: bitmap.width(),
-                height: bitmap.height(),
+            let bytes_per_pixel = if format == glow::RGB { 3 } else { 4 };
+            Ok(BitmapHandle(Arc::new(RegistryData::new(
+                self.gl.clone(),
+                bitmap.width(),
+                bitmap.height(),
                 texture,
-            })))
+                bytes_per_pixel,
+                "register",
+            ))))
         }
     }
 
@@ -1469,13 +1538,70 @@ impl RenderBackend for GlowRenderBackend {
                 glow::PixelUnpackData::Slice(None),
             );
 
-            Ok(BitmapHandle(Arc::new(RegistryData {
-                gl: self.gl.clone(),
+            Ok(BitmapHandle(Arc::new(RegistryData::new(
+                self.gl.clone(),
                 width,
                 height,
                 texture,
-            })))
+                4,
+                "empty",
+            ))))
         }
+    }
+
+    #[cfg(target_os = "vita")]
+    fn create_uniform_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: [u8; 4],
+    ) -> Result<BitmapHandle, BitmapError> {
+        let handle = self.create_empty_texture(width, height)?;
+        let entry = as_registry_data(&handle);
+        unsafe {
+            self.gl
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(self.offscreen_framebuffer));
+            self.gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(entry.texture),
+                0,
+            );
+            if self.gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+                panic!("can't clear uniform BitmapData texture")
+            }
+            self.gl.viewport(0, 0, width as i32, height as i32);
+            self.gl.color_mask(true, true, true, true);
+            self.gl.clear_color(
+                f32::from(rgba[0]) / 255.0,
+                f32::from(rgba[1]) / 255.0,
+                f32::from(rgba[2]) / 255.0,
+                f32::from(rgba[3]) / 255.0,
+            );
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+            self.gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                None,
+                0,
+            );
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl
+                .viewport(0, 0, self.renderbuffer_width, self.renderbuffer_height);
+        }
+        log::info!(
+            "VITA_GPU_TEXTURE_UNIFORM id={} size={}x{} rgba={},{},{},{}",
+            entry.debug_id,
+            width,
+            height,
+            rgba[0],
+            rgba[1],
+            rgba[2],
+            rgba[3],
+        );
+        Ok(handle)
     }
 }
 
