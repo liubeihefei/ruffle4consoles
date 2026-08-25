@@ -158,3 +158,36 @@ pub fn compute_image_parallel_into(
 
     Ok(())
 }
+
+/// Computes one interleaved output row without allocating the complete image.
+pub fn compute_image_parallel_row(
+    components: &[Component],
+    data: &[Vec<u8>],
+    output_size: Dimensions,
+    color_transform: ColorTransform,
+    row: usize,
+    output: &mut [u8],
+) -> Result<()> {
+    let color_convert_func = choose_color_convert_func(components.len(), color_transform)?;
+    let upsampler = Upsampler::new(components, output_size.width, output_size.height)?;
+    let line_size = output_size.width as usize * components.len();
+    if output.len() != line_size {
+        return Err(Error::Format(alloc::format!(
+            "output row has length {}, expected {}",
+            output.len(),
+            line_size
+        )));
+    }
+    if row >= output_size.height as usize {
+        return Err(Error::Format("output row is outside image".to_owned()));
+    }
+
+    upsampler.upsample_and_interleave_row(
+        data,
+        row,
+        output_size.width as usize,
+        output,
+        color_convert_func,
+    );
+    Ok(())
+}

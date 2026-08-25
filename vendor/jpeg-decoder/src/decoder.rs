@@ -9,8 +9,8 @@ use crate::parser::{
 use crate::read_u8;
 use crate::upsampler::Upsampler;
 use crate::worker::{
-    compute_image_parallel, compute_image_parallel_into, PreferWorkerKind, RowData, Worker,
-    WorkerScope,
+    compute_image_parallel, compute_image_parallel_into, compute_image_parallel_row,
+    PreferWorkerKind, RowData, Worker, WorkerScope,
 };
 use alloc::borrow::ToOwned;
 use alloc::sync::Arc;
@@ -266,7 +266,7 @@ impl<R: Read> Decoder<R> {
     ///
     /// If successful, the metadata can be obtained using the `info` method.
     pub fn read_info(&mut self) -> Result<()> {
-        WorkerScope::with(|worker| self.decode_internal(true, worker, None)).map(|_| ())
+        WorkerScope::with(|worker| self.decode_internal(true, worker, None, None)).map(|_| ())
     }
 
     /// Configure the decoder to scale the image during decoding.
@@ -294,14 +294,27 @@ impl<R: Read> Decoder<R> {
 
     /// Decodes the image and returns the decoded pixels if successful.
     pub fn decode(&mut self) -> Result<Vec<u8>> {
-        WorkerScope::with(|worker| self.decode_internal(false, worker, None))
+        WorkerScope::with(|worker| self.decode_internal(false, worker, None, None))
     }
 
     /// Decodes the image directly into a caller-provided output buffer.
     ///
     /// The buffer length must equal the decoder's output buffer size.
     pub fn decode_into(&mut self, output: &mut [u8]) -> Result<()> {
-        WorkerScope::with(|worker| self.decode_internal(false, worker, Some(output))).map(|_| ())
+        WorkerScope::with(|worker| self.decode_internal(false, worker, Some(output), None)).map(|_| ())
+    }
+
+    /// Decodes a JPEG and invokes `callback` once for each interleaved output row.
+    /// The decoder retains its component planes, but does not allocate a complete
+    /// RGB output buffer.
+    pub fn decode_rows<F>(&mut self, mut callback: F) -> Result<()>
+    where
+        F: FnMut(usize, &[u8]) -> Result<()>,
+    {
+        WorkerScope::with(|worker| {
+            self.decode_internal(false, worker, None, Some(&mut callback))
+        })
+        .map(|_| ())
     }
 
     fn decode_internal(
@@ -309,6 +322,7 @@ impl<R: Read> Decoder<R> {
         stop_after_metadata: bool,
         worker_scope: &WorkerScope,
         output: Option<&mut [u8]>,
+        row_callback: Option<&mut dyn FnMut(usize, &[u8]) -> Result<()>>,
     ) -> Result<Vec<u8>> {
         if stop_after_metadata && self.frame.is_some() {
             // The metadata has already been read.
@@ -621,7 +635,7 @@ impl<R: Read> Decoder<R> {
         let preference = Self::select_worker(frame, PreferWorkerKind::Multithreaded);
 
         worker_scope.get_or_init_worker(preference, |worker| {
-            self.decode_planes(worker, planes, planes_u16, output)
+            self.decode_planes(worker, planes, planes_u16, output, row_callback)
         })
     }
 
@@ -631,6 +645,7 @@ impl<R: Read> Decoder<R> {
         mut planes: Vec<Vec<u8>>,
         planes_u16: Vec<Vec<u16>>,
         output: Option<&mut [u8]>,
+        mut row_callback: Option<&mut dyn FnMut(usize, &[u8]) -> Result<()>>,
     ) -> Result<Vec<u8>> {
         if self.frame.is_none() {
             return Err(Error::Format(
@@ -710,6 +725,21 @@ impl<R: Read> Decoder<R> {
             } else {
                 Ok(decoded)
             }
+        } else if let Some(row_callback) = row_callback.as_mut() {
+            let line_size = frame.output_size.width as usize * frame.components.len();
+            let mut line = vec![0; line_size];
+            for row in 0..frame.output_size.height as usize {
+                compute_image_parallel_row(
+                    &frame.components,
+                    &planes,
+                    frame.output_size,
+                    self.determine_color_transform(),
+                    row,
+                    &mut line,
+                )?;
+                row_callback(row, &line)?;
+            }
+            Ok(Vec::new())
         } else if let Some(output) = output {
             compute_image_into(
                 &frame.components,
