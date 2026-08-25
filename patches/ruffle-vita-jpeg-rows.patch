@@ -308,3 +308,94 @@ index 21c106b81..7bfe6bcee 100644
          let bitmap = Bitmap::new(
              self.width(),
              self.height(),
+diff --git "a/render/src/utils.rs" "b/render/src/utils.rs"
+index bd6439dff..bdaa86307 100644
+--- "a/render/src/utils.rs"
++++ "b/render/src/utils.rs"
+@@ -1,4 +1,8 @@
+ use crate::bitmap::{Bitmap, BitmapFormat};
++#[cfg(target_os = "vita")]
++use crate::backend::RenderBackend;
++#[cfg(target_os = "vita")]
++use crate::bitmap::{BitmapHandle, PixelRegion};
+ use crate::error::Error;
+ use png::DecodingError;
+ use std::borrow::Cow;
+@@ -320,6 +324,77 @@ fn decode_jpeg(jpeg_data: &[u8], alpha_data: Option<&[u8]>) -> Result<Bitmap<'st
+     ))
+ }
+ 
++/// Registers a large JPEG3 directly into a renderer one output row at a time.
++/// This is Vita-only because it is intended to avoid the large contiguous RGB/RGBA
++/// staging buffers used by the normal Bitmap path.
++#[cfg(target_os = "vita")]
++pub fn register_define_bits_jpeg3_rows(
++    renderer: &mut dyn RenderBackend,
++    jpeg_data: &[u8],
++    alpha_data: &[u8],
++    width: u32,
++    height: u32,
++) -> Result<BitmapHandle, Error> {
++    let jpeg_data = remove_invalid_jpeg_data(jpeg_data);
++    let mut decoder = jpeg_decoder::Decoder::new(&jpeg_data[..]);
++    decoder.read_info()?;
++    let metadata = decoder
++        .info()
++        .expect("info() should always be Some if read_info returned Ok");
++    if metadata.pixel_format != jpeg_decoder::PixelFormat::RGB24
++        || u32::from(metadata.width) != width
++        || u32::from(metadata.height) != height
++    {
++        return Err(Error::InvalidJpeg(jpeg_decoder::Error::Format(
++            "JPEG3 row upload requires an RGB image with matching dimensions".to_owned(),
++        )));
++    }
++
++    let alpha = decompress_zlib(alpha_data)?;
++    let pixels = width as usize * height as usize;
++    if alpha.len() != pixels {
++        return Err(Error::InvalidZlibCompression);
++    }
++
++    tracing::info!(
++        "VITA_JPEG_ROWS_BEGIN size={}x{} rgb_row_bytes={} alpha_bytes={}",
++        width,
++        height,
++        width * 3,
++        alpha.len(),
++    );
++    let handle = renderer.create_empty_texture(width, height)?;
++    let mut rgba_row = vec![0; width as usize * 4];
++    let mut upload_error = None;
++    decoder.decode_rows(|row, rgb_row| {
++        if upload_error.is_some() {
++            return Ok(());
++        }
++        for x in 0..width as usize {
++            let rgb = x * 3;
++            let rgba = x * 4;
++            let a = alpha[row * width as usize + x];
++            rgba_row[rgba] = rgb_row[rgb].min(a);
++            rgba_row[rgba + 1] = rgb_row[rgb + 1].min(a);
++            rgba_row[rgba + 2] = rgb_row[rgb + 2].min(a);
++            rgba_row[rgba + 3] = a;
++        }
++        if let Err(error) = renderer.update_texture(
++            &handle,
++            Bitmap::new(width, 1, BitmapFormat::Rgba, &rgba_row),
++            PixelRegion::for_region(0, row as u32, width, 1),
++        ) {
++            upload_error = Some(error);
++        }
++        Ok(())
++    })?;
++    if let Some(error) = upload_error {
++        return Err(error);
++    }
++    tracing::info!("VITA_JPEG_ROWS_OK size={}x{}", width, height);
++    Ok(handle)
++}
++
+ /// Decodes the bitmap data in DefineBitsLossless tag into RGBA.
+ /// DefineBitsLossless is Zlib encoded pixel data (similar to PNG), possibly
+ /// palletized.
