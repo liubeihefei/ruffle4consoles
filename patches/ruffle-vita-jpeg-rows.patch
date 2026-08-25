@@ -2,22 +2,13 @@ diff --git "a/core/src/character.rs" "b/core/src/character.rs"
 index cfa2bde44..c250a6afa 100644
 --- "a/core/src/character.rs"
 +++ "b/core/src/character.rs"
-@@ -75,6 +75,11 @@ impl<'gc> BitmapCharacter<'gc> {
-         if let Some(handle) = self.handle.get() {
-             return Ok(handle.clone());
-         }
+@@ -77,0 +78,5 @@ impl<'gc> BitmapCharacter<'gc> {
 +        #[cfg(target_os = "vita")]
 +        if let Some(handle) = self.compressed.register_gpu(backend)? {
 +            self.handle.set(handle.clone()).unwrap();
 +            return Ok(handle);
 +        }
-         let decoded = self.compressed.decode()?;
-         let new_handle = backend.register_bitmap(decoded)?;
-         // FIXME - do we ever want to release this handle, to avoid taking up GPU memory?
-@@ -166,4 +171,36 @@ impl CompressedBitmap {
-             }
-         }
-     }
+@@ -168,0 +174,32 @@ impl CompressedBitmap {
 +
 +    #[cfg(target_os = "vita")]
 +    pub fn register_gpu(
@@ -50,24 +41,14 @@ index cfa2bde44..c250a6afa 100644
 +        )
 +        .map(Some)
 +    }
- }
 diff --git "a/core/src/display_object//bitmap.rs" "b/core/src/display_object//bitmap.rs"
 index cafde0eef..e1bd68169 100644
 --- "a/core/src/display_object//bitmap.rs"
 +++ "b/core/src/display_object//bitmap.rs"
-@@ -1,6 +1,8 @@
- //! Bitmap display object
- 
- use crate::avm1;
+@@ -3,0 +4,2 @@ use crate::avm1;
 +#[cfg(target_os = "vita")]
 +use crate::character::CompressedBitmap;
- use crate::avm2::{
-     Activation as Avm2Activation, BitmapDataObject as Avm2BitmapDataObject,
-     ClassObject as Avm2ClassObject, FunctionArgs as Avm2FunctionArgs,
-@@ -131,6 +133,24 @@ pub struct BitmapGraphicData<'gc> {
- }
- 
- impl<'gc> Bitmap<'gc> {
+@@ -133,0 +136,18 @@ impl<'gc> Bitmap<'gc> {
 +    #[cfg(target_os = "vita")]
 +    pub fn new_with_compressed_bitmap(
 +        mc: &Mutation<'gc>,
@@ -86,17 +67,11 @@ index cafde0eef..e1bd68169 100644
 +        Self::new_with_bitmap_data(mc, id, bitmap_data, true, &movie)
 +    }
 +
-     /// Create a `Bitmap` with dynamic bitmap data.
-     ///
-     /// If `bitmap_data` is provided, the associated `bitmap_handle` must match
 diff --git "a/core/src/library.rs" "b/core/src/library.rs"
 index 1c12e0723..6dd8d2982 100644
 --- "a/core/src/library.rs"
 +++ "b/core/src/library.rs"
-@@ -255,8 +255,18 @@ impl<'gc> MovieLibrary<'gc> {
-         match character {
-             Character::Bitmap(bitmap) => {
-                 let avm2_class = bitmap.avm2_class();
+@@ -258,2 +258,12 @@ impl<'gc> MovieLibrary<'gc> {
 -                let bitmap = bitmap.compressed().decode().unwrap();
 -                let bitmap = Bitmap::new(mc, id, bitmap, self.swf.clone());
 +                #[cfg(target_os = "vita")]
@@ -111,24 +86,14 @@ index 1c12e0723..6dd8d2982 100644
 +                    let bitmap = bitmap.compressed().decode().unwrap();
 +                    Bitmap::new(mc, id, bitmap, self.swf.clone())
 +                };
-                 bitmap.set_avm2_bitmapdata_class(mc, avm2_class);
-                 Some(bitmap.instantiate(mc))
-             }
 diff --git "a/core/src/bitmap//bitmap_data.rs" "b/core/src/bitmap//bitmap_data.rs"
 index 21c106b81..7bfe6bcee 100644
 --- "a/core/src/bitmap//bitmap_data.rs"
 +++ "b/core/src/bitmap//bitmap_data.rs"
-@@ -1,4 +1,6 @@
- use crate::avm2::object::BitmapDataObject;
+@@ -1,0 +2,2 @@ use crate::avm2::object::BitmapDataObject;
 +#[cfg(target_os = "vita")]
 +use crate::character::CompressedBitmap;
- use crate::context::RenderContext;
- use crate::display_object::{DisplayObject, DisplayObjectWeak, TDisplayObject};
- use bitflags::bitflags;
-@@ -269,6 +271,23 @@ impl<'gc> BitmapData<'gc> {
-         Self(data)
-     }
- 
+@@ -271,0 +274,17 @@ impl<'gc> BitmapData<'gc> {
 +    #[cfg(target_os = "vita")]
 +    pub fn new_with_compressed_bitmap(
 +        mc: &Mutation<'gc>,
@@ -146,85 +111,37 @@ index 21c106b81..7bfe6bcee 100644
 +        Self(BitmapRawDataWrapper::new(Gc::new(mc, data.into())))
 +    }
 +
-     pub fn dummy(mc: &Mutation<'gc>) -> Self {
-         Self(BitmapRawDataWrapper::dummy(mc))
-     }
-@@ -412,6 +431,11 @@ pub struct BitmapRawData<'gc> {
-     #[collect(require_static)]
-     discarded_cpu_fill: Option<Color>,
- 
+@@ -414,0 +434,5 @@ pub struct BitmapRawData<'gc> {
 +    /// Compressed static bitmap data retained until a CPU read is required.
 +    #[cfg(target_os = "vita")]
 +    #[collect(require_static)]
 +    compressed: Option<CompressedBitmap>,
 +
-     /// The bitmap handle for this data.
-     ///
-     /// This is lazily initialized; a value of `None` indicates that
-@@ -518,6 +542,8 @@ mod wrapper {
-                     debug_id: 0,
-                     #[cfg(target_os = "vita")]
-                     discarded_cpu_fill: None,
+@@ -520,0 +545,2 @@ mod wrapper {
 +                    #[cfg(target_os = "vita")]
 +                    compressed: None,
-                     bitmap_handle: None,
-                     avm2_object: None,
-                     display_objects: vec![],
-@@ -577,6 +603,8 @@ mod wrapper {
-                 debug_id,
-                 #[cfg(target_os = "vita")]
-                 discarded_cpu_fill: None,
+@@ -579,0 +606,2 @@ mod wrapper {
 +                #[cfg(target_os = "vita")]
 +                compressed: None,
-                 bitmap_handle: None,
-                 avm2_object: None,
-                 display_objects: vec![],
-@@ -597,6 +625,8 @@ mod wrapper {
-             let mut write = unsafe { Write::assume(Gc::as_ref(self.0)) }
-                 .unlock()
-                 .borrow_mut();
+@@ -599,0 +628,2 @@ mod wrapper {
 +            #[cfg(target_os = "vita")]
 +            write.materialize_compressed();
-             match std::mem::replace(&mut write.dirty_state, DirtyState::Clean) {
-                 DirtyState::GpuModified(sync_handle, bounds) => {
-                     #[cfg(target_os = "vita")]
-@@ -708,7 +738,10 @@ mod wrapper {
-             renderer: &mut dyn RenderBackend,
-         ) -> Ref<'_, BitmapRawData<'gc>> {
-             #[cfg(target_os = "vita")]
+@@ -711 +741,4 @@ mod wrapper {
 -            let cpu_pixels_discarded = self.0.borrow().discarded_cpu_fill.is_some();
 +            let cpu_pixels_discarded = {
 +                let bitmap_data = self.0.borrow();
 +                bitmap_data.discarded_cpu_fill.is_some() || bitmap_data.compressed.is_some()
 +            };
-             let needs_update = if let DirtyState::GpuModified(_, area) = self.0.borrow().dirty_state
-             {
-                 area.intersects(read_area)
-@@ -810,7 +843,10 @@ mod wrapper {
- 
-         pub fn can_read(&self, read_area: PixelRegion) -> bool {
-             #[cfg(target_os = "vita")]
+@@ -813 +846,4 @@ mod wrapper {
 -            if self.0.borrow().discarded_cpu_fill.is_some() {
 +            if {
 +                let bitmap_data = self.0.borrow();
 +                bitmap_data.discarded_cpu_fill.is_some() || bitmap_data.compressed.is_some()
 +            } {
-                 return false;
-             }
- 
-@@ -907,6 +943,8 @@ impl<'gc> BitmapRawData<'gc> {
-             debug_id,
-             #[cfg(target_os = "vita")]
-             discarded_cpu_fill: None,
+@@ -909,0 +946,2 @@ impl<'gc> BitmapRawData<'gc> {
 +            #[cfg(target_os = "vita")]
 +            compressed: None,
-             bitmap_handle: None,
-             avm2_object: None,
-             display_objects: vec![],
-@@ -948,6 +986,34 @@ impl<'gc> BitmapRawData<'gc> {
-             debug_id,
-             #[cfg(target_os = "vita")]
-             discarded_cpu_fill: None,
+@@ -950,0 +989,28 @@ impl<'gc> BitmapRawData<'gc> {
 +            #[cfg(target_os = "vita")]
 +            compressed: None,
 +            bitmap_handle: None,
@@ -253,21 +170,9 @@ index 21c106b81..7bfe6bcee 100644
 +            debug_id,
 +            discarded_cpu_fill: None,
 +            compressed: Some(compressed),
-             bitmap_handle: None,
-             avm2_object: None,
-             disposed: false,
-@@ -982,6 +1048,7 @@ impl<'gc> BitmapRawData<'gc> {
-         #[cfg(target_os = "vita")]
-         {
-             self.discarded_cpu_fill = None;
+@@ -984,0 +1051 @@ impl<'gc> BitmapRawData<'gc> {
 +            self.compressed = None;
-         }
-         self.bitmap_handle = None;
-         // There's no longer a handle to update
-@@ -989,6 +1056,27 @@ impl<'gc> BitmapRawData<'gc> {
-         self.disposed = true;
-     }
- 
+@@ -991,0 +1059,21 @@ impl<'gc> BitmapRawData<'gc> {
 +    #[cfg(target_os = "vita")]
 +    fn materialize_compressed(&mut self) {
 +        let Some(compressed) = self.compressed.take() else {
@@ -289,13 +194,7 @@ index 21c106b81..7bfe6bcee 100644
 +        );
 +    }
 +
-     pub fn try_bitmap_handle(
-         &mut self,
-         renderer: &mut dyn RenderBackend,
-@@ -997,6 +1085,15 @@ impl<'gc> BitmapRawData<'gc> {
-             return Ok(handle.clone());
-         }
- 
+@@ -999,0 +1088,9 @@ impl<'gc> BitmapRawData<'gc> {
 +        #[cfg(target_os = "vita")]
 +        if let Some(compressed) = self.compressed.as_ref() {
 +            if let Some(handle) = compressed.register_gpu(renderer)? {
@@ -305,26 +204,16 @@ index 21c106b81..7bfe6bcee 100644
 +            self.materialize_compressed();
 +        }
 +
-         let bitmap = Bitmap::new(
-             self.width(),
-             self.height(),
 diff --git "a/render/src/utils.rs" "b/render/src/utils.rs"
 index bd6439dff..bdaa86307 100644
 --- "a/render/src/utils.rs"
 +++ "b/render/src/utils.rs"
-@@ -1,4 +1,8 @@
- use crate::bitmap::{Bitmap, BitmapFormat};
+@@ -1,0 +2,4 @@ use crate::bitmap::{Bitmap, BitmapFormat};
 +#[cfg(target_os = "vita")]
 +use crate::backend::RenderBackend;
 +#[cfg(target_os = "vita")]
 +use crate::bitmap::{BitmapHandle, PixelRegion};
- use crate::error::Error;
- use png::DecodingError;
- use std::borrow::Cow;
-@@ -320,6 +324,77 @@ fn decode_jpeg(jpeg_data: &[u8], alpha_data: Option<&[u8]>) -> Result<Bitmap<'st
-     ))
- }
- 
+@@ -322,0 +327,71 @@ fn decode_jpeg(jpeg_data: &[u8], alpha_data: Option<&[u8]>) -> Result<Bitmap<'st
 +/// Registers a large JPEG3 directly into a renderer one output row at a time.
 +/// This is Vita-only because it is intended to avoid the large contiguous RGB/RGBA
 +/// staging buffers used by the normal Bitmap path.
@@ -396,6 +285,39 @@ index bd6439dff..bdaa86307 100644
 +    Ok(handle)
 +}
 +
- /// Decodes the bitmap data in DefineBitsLossless tag into RGBA.
- /// DefineBitsLossless is Zlib encoded pixel data (similar to PNG), possibly
- /// palletized.
+diff --git "a/core/src/avm1//globals//bitmap_data.rs" "b/core/src/avm1//globals//bitmap_data.rs"
+index 7fad8da78..c055fe5f8 100644
+--- "a/core/src/avm1//globals//bitmap_data.rs"
++++ "b/core/src/avm1//globals//bitmap_data.rs"
+@@ -1311 +1310,0 @@ fn load_bitmap<'gc>(
+-    let bitmap = bitmap.compressed().decode().unwrap();
+@@ -1314 +1313,2 @@ fn load_bitmap<'gc>(
+-    let bitmap_data = BitmapData::new_with_pixels(
++    #[cfg(target_os = "vita")]
++    let bitmap_data = BitmapData::new_with_compressed_bitmap(
+@@ -1316,2 +1316,2 @@ fn load_bitmap<'gc>(
+-        bitmap.width(),
+-        bitmap.height(),
++        u32::from(bitmap.compressed().size().width),
++        u32::from(bitmap.compressed().size().height),
+@@ -1319,4 +1319 @@ fn load_bitmap<'gc>(
+-        bitmap
+-            .as_colors()
+-            .map(crate::bitmap::bitmap_data::Color::from)
+-            .collect(),
++        bitmap.compressed().clone(),
+@@ -1323,0 +1321,14 @@ fn load_bitmap<'gc>(
++    #[cfg(not(target_os = "vita"))]
++    let bitmap_data = {
++        let bitmap = bitmap.compressed().decode().unwrap();
++        BitmapData::new_with_pixels(
++            activation.context.gc_context,
++            bitmap.width(),
++            bitmap.height(),
++            transparency,
++            bitmap
++                .as_colors()
++                .map(crate::bitmap::bitmap_data::Color::from)
++                .collect(),
++        )
++    };
