@@ -801,7 +801,7 @@ index 300534751..361e2d852 100644
              && transform.matrix.a == 1.0
              && transform.matrix.b == 0.0
 diff --git a/core/src/character.rs b/core/src/character.rs
-index c250a6afa..97a8f4974 100644
+index c250a6afa..902d9759d 100644
 --- a/core/src/character.rs
 +++ b/core/src/character.rs
 @@ -13,6 +13,8 @@ use gc_arena::lock::Lock;
@@ -813,7 +813,188 @@ index c250a6afa..97a8f4974 100644
  use ruffle_render::error::Error as RenderError;
  use swf::{BitmapFormat, CharacterId, DefineBitsLossless};
  
-@@ -172,6 +174,147 @@ impl CompressedBitmap {
+@@ -118,6 +120,180 @@ pub enum CompressedBitmapData {
+     Swf(SwfSlice),
+ }
+ 
++#[cfg(target_os = "vita")]
++const VITA_JPEG_REGION_CACHE_MAX_BYTES: usize = 1536 * 1024;
++
++#[cfg(target_os = "vita")]
++static VITA_JPEG_REGION_CACHE: std::sync::Mutex<Vec<VitaJpegRegionCacheEntry>> =
++    std::sync::Mutex::new(Vec::new());
++
++#[cfg(target_os = "vita")]
++static VITA_JPEG_REGION_CACHE_HITS: std::sync::atomic::AtomicUsize =
++    std::sync::atomic::AtomicUsize::new(0);
++
++#[cfg(target_os = "vita")]
++struct VitaJpegRegionCacheEntry {
++    jpeg_ptr: usize,
++    jpeg_len: usize,
++    alpha_ptr: usize,
++    alpha_len: usize,
++    width: u32,
++    height: u32,
++    x_min: u32,
++    y_min: u32,
++    x_max: u32,
++    y_max: u32,
++    flip_x: bool,
++    rgba: Vec<u8>,
++}
++
++#[cfg(target_os = "vita")]
++impl VitaJpegRegionCacheEntry {
++    fn matches(
++        &self,
++        jpeg_data: &[u8],
++        alpha_data: &[u8],
++        width: u32,
++        height: u32,
++        region: PixelRegion,
++        flip_x: bool,
++    ) -> bool {
++        self.jpeg_ptr == jpeg_data.as_ptr() as usize
++            && self.jpeg_len == jpeg_data.len()
++            && self.alpha_ptr == alpha_data.as_ptr() as usize
++            && self.alpha_len == alpha_data.len()
++            && self.width == width
++            && self.height == height
++            && self.x_min == region.x_min
++            && self.y_min == region.y_min
++            && self.x_max == region.x_max
++            && self.y_max == region.y_max
++            && self.flip_x == flip_x
++    }
++}
++
++#[cfg(target_os = "vita")]
++fn visit_vita_jpeg_region_cached<F>(
++    jpeg_data: &[u8],
++    alpha_data: &[u8],
++    width: u32,
++    height: u32,
++    region: PixelRegion,
++    flip_x: bool,
++    mut visit: F,
++) -> Result<(), RenderError>
++where
++    F: FnMut(u32, u32, [u8; 4]),
++{
++    {
++        let mut cache = VITA_JPEG_REGION_CACHE
++            .lock()
++            .unwrap_or_else(|poisoned| poisoned.into_inner());
++        if let Some(index) = cache.iter().position(|entry| {
++            entry.matches(jpeg_data, alpha_data, width, height, region, flip_x)
++        }) {
++            let entry = cache.remove(index);
++            for y in 0..region.height() {
++                for x in 0..region.width() {
++                    let offset = ((y * region.width() + x) * 4) as usize;
++                    visit(
++                        x,
++                        y,
++                        [
++                            entry.rgba[offset],
++                            entry.rgba[offset + 1],
++                            entry.rgba[offset + 2],
++                            entry.rgba[offset + 3],
++                        ],
++                    );
++                }
++            }
++            let bytes = entry.rgba.capacity();
++            cache.push(entry);
++            let hits = VITA_JPEG_REGION_CACHE_HITS
++                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
++                + 1;
++            if hits <= 4 || hits % 128 == 0 {
++                println!(
++                    "VITA_JPEG_REGION_CACHE_HIT hits={} region={},{},{}x{} flip_x={} bytes={}",
++                    hits,
++                    region.x_min,
++                    region.y_min,
++                    region.width(),
++                    region.height(),
++                    flip_x,
++                    bytes,
++                );
++            }
++            return Ok(());
++        }
++    }
++
++    let expected_bytes = region.width() as usize * region.height() as usize * 4;
++    let mut rgba = Vec::with_capacity(expected_bytes);
++    let result = ruffle_render::utils::visit_define_bits_jpeg3_region(
++        jpeg_data,
++        alpha_data,
++        width,
++        height,
++        region,
++        flip_x,
++        |x, y, color| {
++            rgba.extend_from_slice(&color);
++            visit(x, y, color);
++        },
++    );
++    if result.is_ok()
++        && rgba.len() == expected_bytes
++        && rgba.capacity() <= VITA_JPEG_REGION_CACHE_MAX_BYTES
++    {
++        let mut cache = VITA_JPEG_REGION_CACHE
++            .lock()
++            .unwrap_or_else(|poisoned| poisoned.into_inner());
++        if !cache.iter().any(|entry| {
++            entry.matches(jpeg_data, alpha_data, width, height, region, flip_x)
++        }) {
++            let mut retained_bytes = cache.iter().fold(0usize, |total, entry| {
++                total.saturating_add(entry.rgba.capacity())
++            });
++            while !cache.is_empty()
++                && retained_bytes.saturating_add(rgba.capacity())
++                    > VITA_JPEG_REGION_CACHE_MAX_BYTES
++            {
++                let evicted = cache.remove(0);
++                retained_bytes = retained_bytes.saturating_sub(evicted.rgba.capacity());
++            }
++            let bytes = rgba.capacity();
++            cache.push(VitaJpegRegionCacheEntry {
++                jpeg_ptr: jpeg_data.as_ptr() as usize,
++                jpeg_len: jpeg_data.len(),
++                alpha_ptr: alpha_data.as_ptr() as usize,
++                alpha_len: alpha_data.len(),
++                width,
++                height,
++                x_min: region.x_min,
++                y_min: region.y_min,
++                x_max: region.x_max,
++                y_max: region.y_max,
++                flip_x,
++                rgba,
++            });
++            println!(
++                "VITA_JPEG_REGION_CACHE_STORE entries={} retained_bytes={} region={},{},{}x{} flip_x={} bytes={}",
++                cache.len(),
++                retained_bytes.saturating_add(bytes),
++                region.x_min,
++                region.y_min,
++                region.width(),
++                region.height(),
++                flip_x,
++                bytes,
++            );
++        }
++    }
++    result
++}
++
+ impl AsRef<[u8]> for CompressedBitmapData {
+     fn as_ref(&self) -> &[u8] {
+         match self {
+@@ -172,6 +348,147 @@ impl CompressedBitmap {
          }
      }
  
@@ -921,7 +1102,7 @@ index c250a6afa..97a8f4974 100644
 +            } if ruffle_render::utils::determine_jpeg_tag_format(data.as_ref())
 +                == ruffle_render::utils::JpegTagFormat::Jpeg =>
 +            {
-+                Some(ruffle_render::utils::visit_define_bits_jpeg3_region(
++                Some(visit_vita_jpeg_region_cached(
 +                    data.as_ref(),
 +                    alpha.data(),
 +                    u32::from(*width),
@@ -961,7 +1142,7 @@ index c250a6afa..97a8f4974 100644
      #[cfg(target_os = "vita")]
      pub fn register_gpu(
          &self,
-@@ -187,13 +330,32 @@ impl CompressedBitmap {
+@@ -187,13 +504,32 @@ impl CompressedBitmap {
              return Ok(None);
          };
  
