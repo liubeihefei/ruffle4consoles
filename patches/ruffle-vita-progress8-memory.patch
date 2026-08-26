@@ -797,7 +797,7 @@ index 28425ee88..8b5b36418 100644
      fn update_texture(
          &mut self,
 diff --git a/render/src/utils.rs b/render/src/utils.rs
-index bdaa86307..1345c5aa6 100644
+index bdaa86307..f7c1a8e58 100644
 --- a/render/src/utils.rs
 +++ b/render/src/utils.rs
 @@ -350,30 +350,35 @@ pub fn register_define_bits_jpeg3_rows(
@@ -1003,7 +1003,7 @@ index bdaa86307..1345c5aa6 100644
 +                    let source_x = if flip_x { width - 1 - logical_x } else { logical_x };
 +                    let offset = source_x as usize * 2;
 +                    let packed = u16::from_be_bytes([row[offset], row[offset + 1]]);
-+                    let component = |shift| {
++                    let component = |shift: u16| {
 +                        let value = (packed >> shift) & 0x1f;
 +                        ((value * 255 + 15) / 31) as u8
 +                    };
