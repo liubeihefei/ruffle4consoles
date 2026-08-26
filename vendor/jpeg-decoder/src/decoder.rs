@@ -23,6 +23,40 @@ use std::io::Read;
 
 pub const MAX_COMPONENTS: usize = 4;
 
+#[cfg(target_os = "vita")]
+const VITA_MCU_ROW_POOL_MAX_BYTES: usize = 64 * 1024;
+
+#[cfg(target_os = "vita")]
+static VITA_MCU_ROW_POOL: std::sync::Mutex<[Option<Vec<i16>>; MAX_COMPONENTS]> =
+    std::sync::Mutex::new([None, None, None, None]);
+
+#[cfg(target_os = "vita")]
+fn take_vita_mcu_row(index: usize, len: usize) -> Vec<i16> {
+    let mut pool = VITA_MCU_ROW_POOL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(mut row) = pool[index].take() {
+        if row.len() == len {
+            row.fill(0);
+            return row;
+        }
+        pool[index] = Some(row);
+    }
+    vec![0; len]
+}
+
+#[cfg(target_os = "vita")]
+fn recycle_vita_mcu_row(index: usize, row: Vec<i16>) {
+    let bytes = row.len() * core::mem::size_of::<i16>();
+    if row.is_empty() || bytes > VITA_MCU_ROW_POOL_MAX_BYTES {
+        return;
+    }
+    let mut pool = VITA_MCU_ROW_POOL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pool[index] = Some(row);
+}
+
 mod lossless;
 use self::lossless::compute_image_lossless;
 
@@ -953,7 +987,15 @@ impl<R: Read> Decoder<R> {
                 let coefficients_per_mcu_row = component.block_size.width as usize
                     * component.vertical_sampling_factor as usize
                     * 64;
-                mcu_row_coefficients[i] = vec![0i16; coefficients_per_mcu_row];
+                #[cfg(target_os = "vita")]
+                {
+                    mcu_row_coefficients[i] =
+                        take_vita_mcu_row(i, coefficients_per_mcu_row);
+                }
+                #[cfg(not(target_os = "vita"))]
+                {
+                    mcu_row_coefficients[i] = vec![0i16; coefficients_per_mcu_row];
+                }
             }
         }
 
@@ -1110,7 +1152,7 @@ impl<R: Read> Decoder<R> {
                         * component.vertical_sampling_factor as usize
                         * 64;
 
-                    let row_coefficients = if is_progressive {
+                    if is_progressive {
                         // Because non-interleaved streams will have multiple MCU rows concatenated together,
                         // the row for calculating the offset is different.
                         let worker_mcu_y = if is_interleaved {
@@ -1121,20 +1163,33 @@ impl<R: Read> Decoder<R> {
                         };
 
                         let offset = worker_mcu_y as usize * coefficients_per_mcu_row;
-                        self.coefficients[scan.component_indices[i]]
+                        let row_coefficients = self.coefficients[scan.component_indices[i]]
                             [offset..offset + coefficients_per_mcu_row]
-                            .to_vec()
+                            .to_vec();
+                        worker.append_row((i, row_coefficients))?;
                     } else {
-                        mem::replace(
-                            &mut mcu_row_coefficients[i],
-                            vec![0i16; coefficients_per_mcu_row],
-                        )
-                    };
+                        #[cfg(target_os = "vita")]
+                        worker.append_row_reusable(i, &mut mcu_row_coefficients[i])?;
 
-                    // FIXME: additional potential work stealing opportunities for rayon case if we
-                    // also internally can parallelize over components.
-                    worker.append_row((i, row_coefficients))?;
+                        #[cfg(not(target_os = "vita"))]
+                        {
+                            let row_coefficients = mem::replace(
+                                &mut mcu_row_coefficients[i],
+                                vec![0i16; coefficients_per_mcu_row],
+                            );
+                            // FIXME: additional potential work stealing opportunities for rayon case if we
+                            // also internally can parallelize over components.
+                            worker.append_row((i, row_coefficients))?;
+                        }
+                    }
                 }
+            }
+        }
+
+        #[cfg(target_os = "vita")]
+        if !is_progressive {
+            for (index, row) in mcu_row_coefficients.into_iter().enumerate() {
+                recycle_vita_mcu_row(index, row);
             }
         }
 

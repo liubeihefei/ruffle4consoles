@@ -165,7 +165,9 @@ fn load_config() -> Result<
 > {
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::builder().parse_lossy("info,ruffle=info,avm_trace=info"),
+            tracing_subscriber::EnvFilter::builder().parse_lossy(
+                "info,ruffle=info,avm_trace=info,ruffle_core::bitmap=warn,ruffle_render::utils=warn,ruffle_render_glow=warn",
+            ),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
