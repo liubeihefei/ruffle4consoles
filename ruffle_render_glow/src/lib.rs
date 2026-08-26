@@ -1303,6 +1303,8 @@ impl RenderBackend for GlowRenderBackend {
             }
 
             #[cfg(target_os = "vita")]
+            while self.gl.get_error() != glow::NO_ERROR {}
+            #[cfg(target_os = "vita")]
             self.gl.tex_sub_image_2d(
                 glow::TEXTURE_2D,
                 0,
@@ -1314,6 +1316,23 @@ impl RenderBackend for GlowRenderBackend {
                 glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(Some(bitmap.data())),
             );
+            #[cfg(target_os = "vita")]
+            {
+                let error = self.gl.get_error();
+                if error != glow::NO_ERROR {
+                    log::error!(
+                        "VITA_GPU_TEXTURE_UPDATE_FAILED size={}x{} region={},{},{}x{} gl_error={:#x}",
+                        bitmap.width(),
+                        bitmap.height(),
+                        region.x_min,
+                        region.y_min,
+                        region.width(),
+                        region.height(),
+                        error,
+                    );
+                    return Err(BitmapError::TooLarge);
+                }
+            }
             #[cfg(not(target_os = "vita"))]
             self.gl.tex_image_2d(
                 glow::TEXTURE_2D,
@@ -1526,6 +1545,8 @@ impl RenderBackend for GlowRenderBackend {
                 glow::LINEAR as i32,
             );
 
+            #[cfg(target_os = "vita")]
+            while self.gl.get_error() != glow::NO_ERROR {}
             self.gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
@@ -1537,6 +1558,23 @@ impl RenderBackend for GlowRenderBackend {
                 glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(None),
             );
+
+            #[cfg(target_os = "vita")]
+            {
+                let error = self.gl.get_error();
+                if error != glow::NO_ERROR {
+                    log::error!(
+                        "VITA_GPU_TEXTURE_ALLOC_FAILED size={}x{} bytes={} gl_error={:#x}",
+                        width,
+                        height,
+                        width as usize * height as usize * 4,
+                        error,
+                    );
+                    self.gl.bind_texture(glow::TEXTURE_2D, None);
+                    self.gl.delete_texture(texture);
+                    return Err(BitmapError::TooLarge);
+                }
+            }
 
             Ok(BitmapHandle(Arc::new(RegistryData::new(
                 self.gl.clone(),
@@ -1569,8 +1607,17 @@ impl RenderBackend for GlowRenderBackend {
                 0,
             );
             if self.gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
-                panic!("can't clear uniform BitmapData texture")
+                self.gl.framebuffer_texture_2d(
+                    glow::FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D,
+                    None,
+                    0,
+                );
+                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                return Err(BitmapError::TooLarge);
             }
+            while self.gl.get_error() != glow::NO_ERROR {}
             self.gl.viewport(0, 0, width as i32, height as i32);
             self.gl.color_mask(true, true, true, true);
             self.gl.clear_color(
@@ -1580,6 +1627,7 @@ impl RenderBackend for GlowRenderBackend {
                 f32::from(rgba[3]) / 255.0,
             );
             self.gl.clear(glow::COLOR_BUFFER_BIT);
+            let clear_error = self.gl.get_error();
             self.gl.framebuffer_texture_2d(
                 glow::FRAMEBUFFER,
                 glow::COLOR_ATTACHMENT0,
@@ -1590,6 +1638,15 @@ impl RenderBackend for GlowRenderBackend {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             self.gl
                 .viewport(0, 0, self.renderbuffer_width, self.renderbuffer_height);
+            if clear_error != glow::NO_ERROR {
+                log::error!(
+                    "VITA_GPU_TEXTURE_UNIFORM_FAILED size={}x{} gl_error={:#x}",
+                    width,
+                    height,
+                    clear_error,
+                );
+                return Err(BitmapError::TooLarge);
+            }
         }
         log::info!(
             "VITA_GPU_TEXTURE_UNIFORM id={} size={}x{} rgba={},{},{},{}",

@@ -1,5 +1,5 @@
 diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
-index 7bfe6bcee..985e0dacd 100644
+index 7bfe6bcee..05d2e80bc 100644
 --- a/core/src/bitmap/bitmap_data.rs
 +++ b/core/src/bitmap/bitmap_data.rs
 @@ -75,6 +75,9 @@ const BITMAP_LOG_THRESHOLD_BYTES: usize = 48 * 1024;
@@ -12,7 +12,7 @@ index 7bfe6bcee..985e0dacd 100644
  impl Color {
      #[must_use]
      pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
-@@ -328,6 +331,11 @@ impl<'gc> BitmapData<'gc> {
+@@ -328,6 +331,28 @@ impl<'gc> BitmapData<'gc> {
          self.0.prepare_gpu_draw(mc)
      }
  
@@ -21,10 +21,47 @@ index 7bfe6bcee..985e0dacd 100644
 +        self.0.try_set_sparse_uniform_fill(mc, color)
 +    }
 +
++    #[cfg(target_os = "vita")]
++    pub fn try_defer_horizontal_mirror_from(
++        &self,
++        mc: &Mutation<'gc>,
++        source: BitmapData<'gc>,
++    ) -> bool {
++        self.0.try_defer_horizontal_mirror_from(mc, source.0)
++    }
++
++    #[cfg(target_os = "vita")]
++    pub fn decode_compressed_region(
++        &self,
++        region: PixelRegion,
++    ) -> Option<Result<Vec<Color>, ruffle_render::error::Error>> {
++        self.0.decode_compressed_region(region)
++    }
++
      pub fn read_area(
          &self,
          read_area: PixelRegion,
-@@ -558,6 +566,48 @@ mod wrapper {
+@@ -436,6 +461,10 @@ pub struct BitmapRawData<'gc> {
+     #[collect(require_static)]
+     compressed: Option<CompressedBitmap>,
+ 
++    /// Whether the retained compressed bitmap is viewed as horizontally flipped.
++    #[cfg(target_os = "vita")]
++    compressed_flip_x: bool,
++
+     /// The bitmap handle for this data.
+     ///
+     /// This is lazily initialized; a value of `None` indicates that
+@@ -544,6 +573,8 @@ mod wrapper {
+                     discarded_cpu_fill: None,
+                     #[cfg(target_os = "vita")]
+                     compressed: None,
++                    #[cfg(target_os = "vita")]
++                    compressed_flip_x: false,
+                     bitmap_handle: None,
+                     avm2_object: None,
+                     display_objects: vec![],
+@@ -558,6 +589,49 @@ mod wrapper {
          /// Clones the underlying data, producing a new `BitmapData`
          /// that has no GPU texture or associated display objects
          pub fn clone_data(&self, renderer: &mut dyn RenderBackend) -> BitmapRawData<'gc> {
@@ -60,6 +97,7 @@ index 7bfe6bcee..985e0dacd 100644
 +                        debug_id,
 +                        discarded_cpu_fill: data.discarded_cpu_fill,
 +                        compressed: data.compressed.clone(),
++                        compressed_flip_x: data.compressed_flip_x,
 +                        bitmap_handle: None,
 +                        avm2_object: None,
 +                        display_objects: vec![],
@@ -73,7 +111,16 @@ index 7bfe6bcee..985e0dacd 100644
              // Sync from the GPU to CPU, since our new BitmapData starts out
              // with no GPU texture
              let data = self.sync(renderer).borrow();
-@@ -626,12 +676,12 @@ mod wrapper {
+@@ -605,6 +679,8 @@ mod wrapper {
+                 discarded_cpu_fill: None,
+                 #[cfg(target_os = "vita")]
+                 compressed: None,
++                #[cfg(target_os = "vita")]
++                compressed_flip_x: false,
+                 bitmap_handle: None,
+                 avm2_object: None,
+                 display_objects: vec![],
+@@ -626,12 +702,12 @@ mod wrapper {
                  .unlock()
                  .borrow_mut();
              #[cfg(target_os = "vita")]
@@ -90,7 +137,7 @@ index 7bfe6bcee..985e0dacd 100644
                      let mut sync_handle = Some(sync_handle);
                      let stride = write.width() * 4;
                      let resolved_into_existing = renderer
-@@ -706,7 +756,11 @@ mod wrapper {
+@@ -706,7 +782,11 @@ mod wrapper {
          ) -> (GcRefLock<'gc, BitmapRawData<'gc>>, Option<PixelRegion>) {
              let result = self.prepare_gpu_draw(mc);
              #[cfg(target_os = "vita")]
@@ -103,7 +150,7 @@ index 7bfe6bcee..985e0dacd 100644
              result
          }
  
-@@ -729,6 +783,20 @@ mod wrapper {
+@@ -729,6 +809,85 @@ mod wrapper {
              (self.0, dirty_rect)
          }
  
@@ -121,10 +168,75 @@ index 7bfe6bcee..985e0dacd 100644
 +            true
 +        }
 +
++        #[cfg(target_os = "vita")]
++        pub fn try_defer_horizontal_mirror_from(
++            &self,
++            mc: &Mutation<'gc>,
++            source: Self,
++        ) -> bool {
++            if Gc::ptr_eq(self.0, source.0) {
++                return false;
++            }
++
++            let (compressed, source_flip_x, source_id, width, height) = {
++                let source = source.0.borrow();
++                if matches!(&source.dirty_state, DirtyState::GpuModified(_, _)) {
++                    return false;
++                }
++                let Some(compressed) = source.compressed.clone() else {
++                    return false;
++                };
++                (
++                    compressed,
++                    source.compressed_flip_x,
++                    source.debug_id,
++                    source.width,
++                    source.height,
++                )
++            };
++
++            let mut target = self.0.borrow_mut(mc);
++            if target.width != width
++                || target.height != height
++                || target.discarded_cpu_fill.is_none()
++                || !target.pixels.is_empty()
++            {
++                return false;
++            }
++
++            target.discarded_cpu_fill = None;
++            target.compressed = Some(compressed);
++            target.compressed_flip_x = !source_flip_x;
++            target.bitmap_handle = None;
++            target.dirty_state = DirtyState::Clean;
++            tracing::info!(
++                target: "ruffle_core::bitmap",
++                "VITA_BITMAP_DEFER_MIRROR source_id={} target_id={} size={}x{} flip_x={}",
++                source_id,
++                target.debug_id,
++                width,
++                height,
++                target.compressed_flip_x,
++            );
++            target.inform_display_objects(mc);
++            true
++        }
++
++        #[cfg(target_os = "vita")]
++        pub fn decode_compressed_region(
++            &self,
++            region: PixelRegion,
++        ) -> Option<Result<Vec<super::Color>, ruffle_render::error::Error>> {
++            let data = self.0.borrow();
++            let compressed = data.compressed.as_ref()?;
++            let decoded = compressed.decode_region(region, data.compressed_flip_x);
++            Some(decoded.map(|bitmap| bitmap.as_colors().map(super::Color::from).collect()))
++        }
++
          /// Provides read access to the BitmapData pixels.
          /// Only the provided region is guaranteed to be up-to-date.
          /// It is an error to access any other pixels outside of that region.
-@@ -904,7 +972,9 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -904,7 +1063,9 @@ impl<'gc> BitmapRawData<'gc> {
          #[cfg(target_os = "vita")]
          let pixel_bytes = width as usize * height as usize * std::mem::size_of::<Color>();
          #[cfg(target_os = "vita")]
@@ -135,7 +247,7 @@ index 7bfe6bcee..985e0dacd 100644
              tracing::info!(
                  target: "ruffle_core::bitmap",
                  "VITA_BITMAP_ALLOC_BEGIN id={} kind=fill size={}x{} bytes={} transparent={}",
-@@ -916,13 +986,28 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -916,13 +1077,28 @@ impl<'gc> BitmapRawData<'gc> {
              );
          }
  
@@ -169,7 +281,7 @@ index 7bfe6bcee..985e0dacd 100644
              tracing::info!(
                  target: "ruffle_core::bitmap",
                  "VITA_BITMAP_ALLOC_OK id={} kind=fill size={}x{} bytes={}",
-@@ -942,7 +1027,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -942,9 +1118,11 @@ impl<'gc> BitmapRawData<'gc> {
              #[cfg(target_os = "vita")]
              debug_id,
              #[cfg(target_os = "vita")]
@@ -177,8 +289,21 @@ index 7bfe6bcee..985e0dacd 100644
 +            discarded_cpu_fill: use_sparse.then_some(fill),
              #[cfg(target_os = "vita")]
              compressed: None,
++            #[cfg(target_os = "vita")]
++            compressed_flip_x: false,
              bitmap_handle: None,
-@@ -1006,6 +1091,15 @@ impl<'gc> BitmapRawData<'gc> {
+             avm2_object: None,
+             display_objects: vec![],
+@@ -988,6 +1166,8 @@ impl<'gc> BitmapRawData<'gc> {
+             discarded_cpu_fill: None,
+             #[cfg(target_os = "vita")]
+             compressed: None,
++            #[cfg(target_os = "vita")]
++            compressed_flip_x: false,
+             bitmap_handle: None,
+             avm2_object: None,
+             disposed: false,
+@@ -1006,6 +1186,15 @@ impl<'gc> BitmapRawData<'gc> {
          compressed: CompressedBitmap,
      ) -> Self {
          let debug_id = NEXT_BITMAP_DEBUG_ID.fetch_add(1, Ordering::Relaxed);
@@ -194,7 +319,15 @@ index 7bfe6bcee..985e0dacd 100644
          Self {
              pixels: Vec::new(),
              width,
-@@ -1030,16 +1124,20 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1014,6 +1203,7 @@ impl<'gc> BitmapRawData<'gc> {
+             debug_id,
+             discarded_cpu_fill: None,
+             compressed: Some(compressed),
++            compressed_flip_x: false,
+             bitmap_handle: None,
+             avm2_object: None,
+             disposed: false,
+@@ -1030,16 +1220,20 @@ impl<'gc> BitmapRawData<'gc> {
  
      pub fn dispose(&mut self) {
          #[cfg(target_os = "vita")]
@@ -219,7 +352,29 @@ index 7bfe6bcee..985e0dacd 100644
              );
          }
          self.width = 0;
-@@ -1077,6 +1175,78 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1049,6 +1243,7 @@ impl<'gc> BitmapRawData<'gc> {
+         {
+             self.discarded_cpu_fill = None;
+             self.compressed = None;
++            self.compressed_flip_x = false;
+         }
+         self.bitmap_handle = None;
+         // There's no longer a handle to update
+@@ -1062,8 +1257,12 @@ impl<'gc> BitmapRawData<'gc> {
+             return;
+         };
+         let bitmap = compressed
+-            .decode()
++            .decode_region(
++                PixelRegion::for_whole_size(self.width, self.height),
++                self.compressed_flip_x,
++            )
+             .expect("Failed to decode compressed BitmapData");
++        self.compressed_flip_x = false;
+         debug_assert_eq!(bitmap.width(), self.width);
+         debug_assert_eq!(bitmap.height(), self.height);
+         self.pixels = bitmap.as_colors().map(Color::from).collect();
+@@ -1077,6 +1276,79 @@ impl<'gc> BitmapRawData<'gc> {
          );
      }
  
@@ -246,6 +401,7 @@ index 7bfe6bcee..985e0dacd 100644
 +        self.pixels.clear();
 +        self.pixels.shrink_to_fit();
 +        self.compressed = None;
++        self.compressed_flip_x = false;
 +        self.discarded_cpu_fill = Some(color);
 +        self.dirty_state = if self.bitmap_handle.is_some() {
 +            DirtyState::CpuModified(PixelRegion::for_whole_size(self.width, self.height))
@@ -298,7 +454,18 @@ index 7bfe6bcee..985e0dacd 100644
      pub fn try_bitmap_handle(
          &mut self,
          renderer: &mut dyn RenderBackend,
-@@ -1094,6 +1264,14 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1086,7 +1358,9 @@ impl<'gc> BitmapRawData<'gc> {
+         }
+ 
+         #[cfg(target_os = "vita")]
+-        if let Some(compressed) = self.compressed.as_ref() {
++        if let Some(compressed) = self.compressed.as_ref()
++            && !self.compressed_flip_x
++        {
+             if let Some(handle) = compressed.register_gpu(renderer)? {
+                 self.bitmap_handle = Some(handle.clone());
+                 return Ok(handle);
+@@ -1094,6 +1368,14 @@ impl<'gc> BitmapRawData<'gc> {
              self.materialize_compressed();
          }
  
@@ -313,7 +480,7 @@ index 7bfe6bcee..985e0dacd 100644
          let bitmap = Bitmap::new(
              self.width(),
              self.height(),
-@@ -1247,7 +1425,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1247,7 +1529,7 @@ impl<'gc> BitmapRawData<'gc> {
          let pixel_bytes = self.width as usize * self.height as usize * std::mem::size_of::<Color>();
          tracing::info!(
              target: "ruffle_core::bitmap",
@@ -322,7 +489,7 @@ index 7bfe6bcee..985e0dacd 100644
              self.debug_id,
              self.width,
              self.height,
-@@ -1267,6 +1445,22 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1267,6 +1549,22 @@ impl<'gc> BitmapRawData<'gc> {
      // Updates the data stored with our `BitmapHandle` if this `BitmapRawData`
      // is dirty
      pub fn update_dirty_texture(&mut self, renderer: &mut dyn RenderBackend) {
@@ -346,7 +513,7 @@ index 7bfe6bcee..985e0dacd 100644
          match &self.dirty_state {
              DirtyState::CpuModified(region) => {
 diff --git a/core/src/bitmap/operations.rs b/core/src/bitmap/operations.rs
-index 300534751..a1bea5153 100644
+index 300534751..6962a540f 100644
 --- a/core/src/bitmap/operations.rs
 +++ b/core/src/bitmap/operations.rs
 @@ -46,6 +46,14 @@ pub fn fill_rect<'gc>(
@@ -373,11 +540,183 @@ index 300534751..a1bea5153 100644
      let mut write = target.borrow_mut(context.gc());
      let dest = write.bitmap_handle(context.renderer);
  
+@@ -1321,6 +1329,61 @@ fn copy_on_cpu<'gc>(
+ 
+         write.set_cpu_dirty(context, dest_region);
+     } else {
++        #[cfg(target_os = "vita")]
++        if let Some(decoded) = source.decode_compressed_region(source_region) {
++            match decoded {
++                Ok(source_pixels) => {
++                    let dest = dest.sync(renderer);
++                    let mut dest_write = dest.borrow_mut(context);
++                    let opaque = !dest_write.transparency();
++                    let source_width = source_region.width() as usize;
++
++                    for y in 0..dest_region.height() {
++                        for x in 0..dest_region.width() {
++                            let mut color = source_pixels
++                                [y as usize * source_width + x as usize];
++                            if blend {
++                                color = dest_write
++                                    .get_pixel32_raw(dest_region.x_min + x, dest_region.y_min + y)
++                                    .blend_over(&color);
++                            }
++                            if opaque {
++                                color = color.with_alpha(255);
++                            }
++                            dest_write.set_pixel32_raw(
++                                dest_region.x_min + x,
++                                dest_region.y_min + y,
++                                color,
++                            );
++                        }
++                    }
++
++                    tracing::info!(
++                        target: "ruffle_core::bitmap",
++                        "VITA_BITMAP_COPY_COMPRESSED_REGION source={},{},{}x{} dest={},{},{}x{} blend={}",
++                        source_region.x_min,
++                        source_region.y_min,
++                        source_region.width(),
++                        source_region.height(),
++                        dest_region.x_min,
++                        dest_region.y_min,
++                        dest_region.width(),
++                        dest_region.height(),
++                        blend,
++                    );
++                    dest_write.set_cpu_dirty(context, dest_region);
++                    return;
++                }
++                Err(error) => {
++                    tracing::error!(
++                        target: "ruffle_core::bitmap",
++                        "VITA_BITMAP_COPY_COMPRESSED_REGION_FAILED error={:?}",
++                        error,
++                    );
++                }
++            }
++        }
++
+         let dest = dest.sync(renderer);
+         let mut dest_write = dest.borrow_mut(context);
+         let source_read = source.read_area(source_region, renderer);
+@@ -1466,6 +1529,24 @@ pub fn draw<'gc>(
+             return Ok(());
+         }
+ 
++        #[cfg(target_os = "vita")]
++        if !smoothing
++            && clip_rect.is_none()
++            && (blend_mode == BlendMode::Normal || blend_mode == BlendMode::Layer)
++            && transform.color_transform == ColorTransform::default()
++            && transform.matrix.a == -1.0
++            && transform.matrix.b == 0.0
++            && transform.matrix.c == 0.0
++            && transform.matrix.d == 1.0
++            && transform.matrix.tx == Twips::from_pixels(source.width() as f64)
++            && transform.matrix.ty == Twips::ZERO
++            && source.width() == target.width()
++            && source.height() == target.height()
++            && target.try_defer_horizontal_mirror_from(context.gc(), *source)
++        {
++            return Ok(());
++        }
++
+         if (blend_mode == BlendMode::Normal || blend_mode == BlendMode::Layer)
+             && transform.matrix.a == 1.0
+             && transform.matrix.b == 0.0
 diff --git a/core/src/character.rs b/core/src/character.rs
-index c250a6afa..25a05c9db 100644
+index c250a6afa..61193f8f4 100644
 --- a/core/src/character.rs
 +++ b/core/src/character.rs
-@@ -187,13 +187,32 @@ impl CompressedBitmap {
+@@ -13,6 +13,8 @@ use gc_arena::lock::Lock;
+ use gc_arena::{Collect, Gc, Mutation};
+ use ruffle_render::backend::RenderBackend;
+ use ruffle_render::bitmap::{Bitmap as RenderBitmap, BitmapHandle, BitmapSize};
++#[cfg(target_os = "vita")]
++use ruffle_render::bitmap::PixelRegion;
+ use ruffle_render::error::Error as RenderError;
+ use swf::{BitmapFormat, CharacterId, DefineBitsLossless};
+ 
+@@ -172,6 +174,75 @@ impl CompressedBitmap {
+         }
+     }
+ 
++    #[cfg(target_os = "vita")]
++    pub fn decode_region(
++        &self,
++        region: PixelRegion,
++        flip_x: bool,
++    ) -> Result<RenderBitmap<'static>, RenderError> {
++        match self {
++            CompressedBitmap::Jpeg {
++                data,
++                alpha: Some(alpha),
++                width,
++                height,
++            } if ruffle_render::utils::determine_jpeg_tag_format(data.as_ref())
++                == ruffle_render::utils::JpegTagFormat::Jpeg =>
++            {
++                ruffle_render::utils::decode_define_bits_jpeg3_region(
++                    data.as_ref(),
++                    alpha.data(),
++                    u32::from(*width),
++                    u32::from(*height),
++                    region,
++                    flip_x,
++                )
++            }
++            CompressedBitmap::Lossless {
++                data,
++                id,
++                format,
++                width,
++                height,
++                version,
++            } => {
++                let define_bits_lossless = DefineBitsLossless {
++                    data: Cow::Borrowed(data.data()),
++                    id: *id,
++                    format: *format,
++                    width: *width,
++                    height: *height,
++                    version: *version,
++                };
++                ruffle_render::utils::decode_define_bits_lossless_region(
++                    &define_bits_lossless,
++                    region,
++                    flip_x,
++                )
++            }
++            _ => {
++                let bitmap = self.decode()?.to_rgba();
++                let source_width = bitmap.width();
++                let mut rgba = Vec::with_capacity(
++                    region.width() as usize * region.height() as usize * 4,
++                );
++                for y in region.y_min..region.y_max {
++                    for x in region.x_min..region.x_max {
++                        let source_x = if flip_x { source_width - 1 - x } else { x };
++                        let offset = ((y * source_width + source_x) * 4) as usize;
++                        rgba.extend_from_slice(&bitmap.data()[offset..offset + 4]);
++                    }
++                }
++                Ok(RenderBitmap::new(
++                    region.width(),
++                    region.height(),
++                    ruffle_render::bitmap::BitmapFormat::Rgba,
++                    rgba,
++                ))
++            }
++        }
++    }
++
+     #[cfg(target_os = "vita")]
+     pub fn register_gpu(
+         &self,
+@@ -187,13 +258,32 @@ impl CompressedBitmap {
              return Ok(None);
          };
  
@@ -458,7 +797,7 @@ index 28425ee88..8b5b36418 100644
      fn update_texture(
          &mut self,
 diff --git a/render/src/utils.rs b/render/src/utils.rs
-index bdaa86307..8e8de16d3 100644
+index bdaa86307..1345c5aa6 100644
 --- a/render/src/utils.rs
 +++ b/render/src/utils.rs
 @@ -350,30 +350,35 @@ pub fn register_define_bits_jpeg3_rows(
@@ -505,7 +844,7 @@ index bdaa86307..8e8de16d3 100644
              rgba_row[rgba] = rgb_row[rgb].min(a);
              rgba_row[rgba + 1] = rgb_row[rgb + 1].min(a);
              rgba_row[rgba + 2] = rgb_row[rgb + 2].min(a);
-@@ -385,13 +390,28 @@ pub fn register_define_bits_jpeg3_rows(
+@@ -385,16 +390,257 @@ pub fn register_define_bits_jpeg3_rows(
              PixelRegion::for_region(0, row as u32, width, 1),
          ) {
              upload_error = Some(error);
@@ -535,3 +874,232 @@ index bdaa86307..8e8de16d3 100644
      Ok(handle)
  }
  
++/// Decodes only a requested rectangle from a large JPEG3 bitmap. This keeps
++/// Vita from allocating the full RGBA image when ActionScript immediately
++/// extracts one animation frame from a sprite sheet.
++#[cfg(target_os = "vita")]
++pub fn decode_define_bits_jpeg3_region(
++    jpeg_data: &[u8],
++    alpha_data: &[u8],
++    width: u32,
++    height: u32,
++    region: PixelRegion,
++    flip_x: bool,
++) -> Result<Bitmap<'static>, Error> {
++    if region.x_max > width || region.y_max > height {
++        return Err(Error::InvalidSize);
++    }
++
++    let jpeg_data = remove_invalid_jpeg_data(jpeg_data);
++    let mut decoder = jpeg_decoder::Decoder::new(&jpeg_data[..]);
++    decoder.read_info()?;
++    let metadata = decoder
++        .info()
++        .expect("info() should always be Some if read_info returned Ok");
++    if metadata.pixel_format != jpeg_decoder::PixelFormat::RGB24
++        || u32::from(metadata.width) != width
++        || u32::from(metadata.height) != height
++    {
++        return Err(Error::InvalidJpeg(jpeg_decoder::Error::Format(
++            "JPEG3 region decode requires an RGB image with matching dimensions".to_owned(),
++        )));
++    }
++
++    let mut alpha_decoder = flate2::bufread::ZlibDecoder::new(alpha_data);
++    let mut alpha_row = vec![0; width as usize];
++    let mut rgba = vec![0; region.width() as usize * region.height() as usize * 4];
++    let mut alpha_decode_failed = false;
++
++    decoder.decode_rows(|row, rgb_row| {
++        if alpha_decode_failed {
++            return Ok(());
++        }
++        if alpha_decoder.read_exact(&mut alpha_row).is_err() {
++            alpha_decode_failed = true;
++            return Ok(());
++        }
++        let row = row as u32;
++        if row < region.y_min || row >= region.y_max {
++            return Ok(());
++        }
++
++        let output_y = (row - region.y_min) as usize;
++        for output_x in 0..region.width() {
++            let logical_x = region.x_min + output_x;
++            let source_x = if flip_x {
++                width - 1 - logical_x
++            } else {
++                logical_x
++            } as usize;
++            let rgb_offset = source_x * 3;
++            let rgba_offset = (output_y * region.width() as usize + output_x as usize) * 4;
++            let alpha = alpha_row[source_x];
++            rgba[rgba_offset] = rgb_row[rgb_offset].min(alpha);
++            rgba[rgba_offset + 1] = rgb_row[rgb_offset + 1].min(alpha);
++            rgba[rgba_offset + 2] = rgb_row[rgb_offset + 2].min(alpha);
++            rgba[rgba_offset + 3] = alpha;
++        }
++        Ok(())
++    })?;
++
++    let mut trailing_alpha = [0u8; 1];
++    let trailing_alpha_bytes = alpha_decoder
++        .read(&mut trailing_alpha)
++        .map_err(|_| Error::InvalidZlibCompression)?;
++    if alpha_decode_failed || trailing_alpha_bytes != 0 {
++        return Err(Error::InvalidZlibCompression);
++    }
++
++    tracing::info!(
++        "VITA_JPEG_REGION_OK source={}x{} region={},{},{}x{} flip_x={} decoded_bytes={}",
++        width,
++        height,
++        region.x_min,
++        region.y_min,
++        region.width(),
++        region.height(),
++        flip_x,
++        rgba.len(),
++    );
++    Ok(Bitmap::new(
++        region.width(),
++        region.height(),
++        BitmapFormat::Rgba,
++        rgba,
++    ))
++}
++
++/// Decodes only a requested rectangle from a DefineBitsLossless bitmap.
++#[cfg(target_os = "vita")]
++pub fn decode_define_bits_lossless_region(
++    swf_tag: &swf::DefineBitsLossless,
++    region: PixelRegion,
++    flip_x: bool,
++) -> Result<Bitmap<'static>, Error> {
++    let width = u32::from(swf_tag.width);
++    let height = u32::from(swf_tag.height);
++    if region.x_max > width || region.y_max > height {
++        return Err(Error::InvalidSize);
++    }
++    validate_size(swf_tag.width, swf_tag.height)?;
++
++    let has_alpha = swf_tag.version == 2;
++    let mut decoder = flate2::bufread::ZlibDecoder::new(&swf_tag.data[..]);
++    let mut rgba = Vec::with_capacity(region.width() as usize * region.height() as usize * 4);
++
++    match (swf_tag.version, swf_tag.format) {
++        (1, swf::BitmapFormat::Rgb15) => {
++            let padded_width = (width + 1) & !1;
++            let mut row = vec![0; padded_width as usize * 2];
++            for y in 0..height {
++                decoder
++                    .read_exact(&mut row)
++                    .map_err(|_| Error::InvalidZlibCompression)?;
++                if y < region.y_min || y >= region.y_max {
++                    continue;
++                }
++                for output_x in 0..region.width() {
++                    let logical_x = region.x_min + output_x;
++                    let source_x = if flip_x { width - 1 - logical_x } else { logical_x };
++                    let offset = source_x as usize * 2;
++                    let packed = u16::from_be_bytes([row[offset], row[offset + 1]]);
++                    let component = |shift| {
++                        let value = (packed >> shift) & 0x1f;
++                        ((value * 255 + 15) / 31) as u8
++                    };
++                    rgba.extend([component(10), component(5), component(0), u8::MAX]);
++                }
++            }
++        }
++        (1 | 2, swf::BitmapFormat::Rgb32) => {
++            let mut row = vec![0; width as usize * 4];
++            for y in 0..height {
++                decoder
++                    .read_exact(&mut row)
++                    .map_err(|_| Error::InvalidZlibCompression)?;
++                if y < region.y_min || y >= region.y_max {
++                    continue;
++                }
++                for output_x in 0..region.width() {
++                    let logical_x = region.x_min + output_x;
++                    let source_x = if flip_x { width - 1 - logical_x } else { logical_x };
++                    let offset = source_x as usize * 4;
++                    rgba.extend([
++                        row[offset + 1],
++                        row[offset + 2],
++                        row[offset + 3],
++                        if has_alpha { row[offset] } else { u8::MAX },
++                    ]);
++                }
++            }
++        }
++        (1 | 2, swf::BitmapFormat::ColorMap8 { num_colors }) => {
++            let color_count = usize::from(num_colors) + 1;
++            let palette_stride = if has_alpha { 4 } else { 3 };
++            let mut palette_data = vec![0; color_count * palette_stride];
++            decoder
++                .read_exact(&mut palette_data)
++                .map_err(|_| Error::InvalidZlibCompression)?;
++            let palette: Vec<Color> = palette_data
++                .chunks_exact(palette_stride)
++                .map(|entry| Color {
++                    r: entry[0],
++                    g: entry[1],
++                    b: entry[2],
++                    a: if has_alpha { entry[3] } else { u8::MAX },
++                })
++                .collect();
++            let padded_width = (width + 3) & !3;
++            let mut row = vec![0; padded_width as usize];
++            for y in 0..height {
++                decoder
++                    .read_exact(&mut row)
++                    .map_err(|_| Error::InvalidZlibCompression)?;
++                if y < region.y_min || y >= region.y_max {
++                    continue;
++                }
++                for output_x in 0..region.width() {
++                    let logical_x = region.x_min + output_x;
++                    let source_x = if flip_x { width - 1 - logical_x } else { logical_x };
++                    let color = palette
++                        .get(row[source_x as usize] as usize)
++                        .copied()
++                        .unwrap_or(if has_alpha {
++                            Color::TRANSPARENT
++                        } else {
++                            Color::BLACK
++                        });
++                    rgba.extend([color.r, color.g, color.b, color.a]);
++                }
++            }
++        }
++        _ => {
++            return Err(Error::UnsupportedLosslessFormat(
++                swf_tag.version,
++                swf_tag.format,
++            ));
++        }
++    }
++
++    tracing::info!(
++        "VITA_LOSSLESS_REGION_OK source={}x{} region={},{},{}x{} flip_x={} decoded_bytes={}",
++        width,
++        height,
++        region.x_min,
++        region.y_min,
++        region.width(),
++        region.height(),
++        flip_x,
++        rgba.len(),
++    );
++    Ok(Bitmap::new(
++        region.width(),
++        region.height(),
++        BitmapFormat::Rgba,
++        rgba,
++    ))
++}
++
+ /// Decodes the bitmap data in DefineBitsLossless tag into RGBA.
+ /// DefineBitsLossless is Zlib encoded pixel data (similar to PNG), possibly
+ /// palletized.
