@@ -479,8 +479,22 @@ impl<R: Read> Decoder<R> {
                             }
                         }
 
-                        let preference =
-                            Self::select_worker(&frame, PreferWorkerKind::Multithreaded);
+                        let preference = {
+                            let selected =
+                                Self::select_worker(&frame, PreferWorkerKind::Multithreaded);
+                            #[cfg(target_os = "vita")]
+                            {
+                                if row_callback.is_some() {
+                                    PreferWorkerKind::Immediate
+                                } else {
+                                    selected
+                                }
+                            }
+                            #[cfg(not(target_os = "vita"))]
+                            {
+                                selected
+                            }
+                        };
 
                         let (marker, data) = worker_scope
                             .get_or_init_worker(preference, |worker| {

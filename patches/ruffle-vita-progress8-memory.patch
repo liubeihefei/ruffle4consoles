@@ -920,7 +920,7 @@ index bdaa86307..f7c1a8e58 100644
              rgba_row[rgba] = rgb_row[rgb].min(a);
              rgba_row[rgba + 1] = rgb_row[rgb + 1].min(a);
              rgba_row[rgba + 2] = rgb_row[rgb + 2].min(a);
-@@ -385,16 +390,257 @@ pub fn register_define_bits_jpeg3_rows(
+@@ -385,16 +390,273 @@ pub fn register_define_bits_jpeg3_rows(
              PixelRegion::for_region(0, row as u32, width, 1),
          ) {
              upload_error = Some(error);
@@ -983,8 +983,20 @@ index bdaa86307..f7c1a8e58 100644
 +
 +    let mut alpha_decoder = flate2::bufread::ZlibDecoder::new(alpha_data);
 +    let mut alpha_row = vec![0; width as usize];
-+    let mut rgba = vec![0; region.width() as usize * region.height() as usize * 4];
++    let mut rgba = Vec::new();
 +    let mut alpha_decode_failed = false;
++
++    tracing::info!(
++        "VITA_JPEG_REGION_BEGIN source={}x{} region={},{},{}x{} flip_x={} worker=immediate output_bytes_deferred={}",
++        width,
++        height,
++        region.x_min,
++        region.y_min,
++        region.width(),
++        region.height(),
++        flip_x,
++        region.width() as usize * region.height() as usize * 4,
++    );
 +
 +    decoder.decode_rows(|row, rgb_row| {
 +        if alpha_decode_failed {
@@ -997,6 +1009,10 @@ index bdaa86307..f7c1a8e58 100644
 +        let row = row as u32;
 +        if row < region.y_min || row >= region.y_max {
 +            return Ok(());
++        }
++
++        if rgba.is_empty() {
++            rgba.resize(region.width() as usize * region.height() as usize * 4, 0);
 +        }
 +
 +        let output_y = (row - region.y_min) as usize;
