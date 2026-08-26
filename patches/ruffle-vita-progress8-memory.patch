@@ -7,7 +7,7 @@ index 7bfe6bcee..8b107c35c 100644
  const BITMAP_CPU_DROP_MIN_BYTES: usize = 4 * 1024;
  
 +#[cfg(target_os = "vita")]
-+const BITMAP_SPARSE_MIN_BYTES: usize = 64 * 1024;
++const BITMAP_SPARSE_MIN_BYTES: usize = 32 * 1024;
 +
  impl Color {
      #[must_use]
