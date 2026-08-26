@@ -1,5 +1,5 @@
 diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
-index 7bfe6bcee..05d2e80bc 100644
+index 7bfe6bcee..8b107c35c 100644
 --- a/core/src/bitmap/bitmap_data.rs
 +++ b/core/src/bitmap/bitmap_data.rs
 @@ -75,6 +75,9 @@ const BITMAP_LOG_THRESHOLD_BYTES: usize = 48 * 1024;
@@ -454,18 +454,23 @@ index 7bfe6bcee..05d2e80bc 100644
      pub fn try_bitmap_handle(
          &mut self,
          renderer: &mut dyn RenderBackend,
-@@ -1086,7 +1358,9 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1086,14 +1358,26 @@ impl<'gc> BitmapRawData<'gc> {
          }
  
          #[cfg(target_os = "vita")]
 -        if let Some(compressed) = self.compressed.as_ref() {
-+        if let Some(compressed) = self.compressed.as_ref()
-+            && !self.compressed_flip_x
-+        {
-             if let Some(handle) = compressed.register_gpu(renderer)? {
-                 self.bitmap_handle = Some(handle.clone());
-                 return Ok(handle);
-@@ -1094,6 +1368,14 @@ impl<'gc> BitmapRawData<'gc> {
+-            if let Some(handle) = compressed.register_gpu(renderer)? {
+-                self.bitmap_handle = Some(handle.clone());
+-                return Ok(handle);
++        if !self.compressed_flip_x {
++            if let Some(compressed) = self.compressed.as_ref() {
++                if let Some(handle) = compressed.register_gpu(renderer)? {
++                    self.bitmap_handle = Some(handle.clone());
++                    return Ok(handle);
++                }
+             }
++        }
++        if self.compressed.is_some() {
              self.materialize_compressed();
          }
  
@@ -480,7 +485,7 @@ index 7bfe6bcee..05d2e80bc 100644
          let bitmap = Bitmap::new(
              self.width(),
              self.height(),
-@@ -1247,7 +1529,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1247,7 +1531,7 @@ impl<'gc> BitmapRawData<'gc> {
          let pixel_bytes = self.width as usize * self.height as usize * std::mem::size_of::<Color>();
          tracing::info!(
              target: "ruffle_core::bitmap",
@@ -489,7 +494,7 @@ index 7bfe6bcee..05d2e80bc 100644
              self.debug_id,
              self.width,
              self.height,
-@@ -1267,6 +1549,22 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1267,6 +1551,22 @@ impl<'gc> BitmapRawData<'gc> {
      // Updates the data stored with our `BitmapHandle` if this `BitmapRawData`
      // is dirty
      pub fn update_dirty_texture(&mut self, renderer: &mut dyn RenderBackend) {
