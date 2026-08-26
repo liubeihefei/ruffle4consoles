@@ -27,7 +27,10 @@ pub const MAX_COMPONENTS: usize = 4;
 const VITA_MCU_ROW_POOL_MAX_BYTES: usize = 64 * 1024;
 
 #[cfg(target_os = "vita")]
-const VITA_COMPONENT_PLANE_POOL_MAX_BYTES: usize = 6 * 1024 * 1024;
+const VITA_COMPONENT_PLANE_POOL_MAX_PLANE_BYTES: usize = 1024 * 1024;
+
+#[cfg(target_os = "vita")]
+const VITA_COMPONENT_PLANE_POOL_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 #[cfg(target_os = "vita")]
 static VITA_MCU_ROW_POOL: std::sync::Mutex<[Option<Vec<i16>>; MAX_COMPONENTS]> =
@@ -87,7 +90,7 @@ fn recycle_vita_component_planes(planes: Vec<Vec<u8>>) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     for (index, plane) in planes.into_iter().enumerate().take(MAX_COMPONENTS) {
-        if plane.is_empty() || plane.capacity() > VITA_COMPONENT_PLANE_POOL_MAX_BYTES {
+        if plane.is_empty() || plane.capacity() > VITA_COMPONENT_PLANE_POOL_MAX_PLANE_BYTES {
             continue;
         }
         let retained_without_slot = pool
