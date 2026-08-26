@@ -27,7 +27,14 @@ pub const MAX_COMPONENTS: usize = 4;
 const VITA_MCU_ROW_POOL_MAX_BYTES: usize = 64 * 1024;
 
 #[cfg(target_os = "vita")]
+const VITA_COMPONENT_PLANE_POOL_MAX_BYTES: usize = 6 * 1024 * 1024;
+
+#[cfg(target_os = "vita")]
 static VITA_MCU_ROW_POOL: std::sync::Mutex<[Option<Vec<i16>>; MAX_COMPONENTS]> =
+    std::sync::Mutex::new([None, None, None, None]);
+
+#[cfg(target_os = "vita")]
+static VITA_COMPONENT_PLANE_POOL: std::sync::Mutex<[Option<Vec<u8>>; MAX_COMPONENTS]> =
     std::sync::Mutex::new([None, None, None, None]);
 
 #[cfg(target_os = "vita")]
@@ -55,6 +62,46 @@ fn recycle_vita_mcu_row(index: usize, row: Vec<i16>) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     pool[index] = Some(row);
+}
+
+#[cfg(target_os = "vita")]
+pub(crate) fn take_vita_component_plane(index: usize, len: usize) -> Vec<u8> {
+    let plane = {
+        let mut pool = VITA_COMPONENT_PLANE_POOL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        pool[index].take()
+    };
+    if let Some(mut plane) = plane {
+        if plane.len() == len {
+            plane.fill(0);
+            return plane;
+        }
+    }
+    vec![0; len]
+}
+
+#[cfg(target_os = "vita")]
+fn recycle_vita_component_planes(planes: Vec<Vec<u8>>) {
+    let mut pool = VITA_COMPONENT_PLANE_POOL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (index, plane) in planes.into_iter().enumerate().take(MAX_COMPONENTS) {
+        if plane.is_empty() || plane.capacity() > VITA_COMPONENT_PLANE_POOL_MAX_BYTES {
+            continue;
+        }
+        let retained_without_slot = pool
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| *slot != index)
+            .filter_map(|(_, plane)| plane.as_ref())
+            .fold(0usize, |total, plane| total.saturating_add(plane.capacity()));
+        if retained_without_slot.saturating_add(plane.capacity())
+            <= VITA_COMPONENT_PLANE_POOL_MAX_BYTES
+        {
+            pool[index] = Some(plane);
+        }
+    }
 }
 
 mod lossless;
@@ -776,18 +823,25 @@ impl<R: Read> Decoder<R> {
         } else if let Some(row_callback) = row_callback.as_mut() {
             let line_size = frame.output_size.width as usize * frame.components.len();
             let mut line = vec![0; line_size];
-            for row in 0..frame.output_size.height as usize {
-                compute_image_parallel_row(
-                    &frame.components,
-                    &planes,
-                    frame.output_size,
-                    self.determine_color_transform(),
-                    row,
-                    &mut line,
-                )?;
-                row_callback(row, &line)?;
+            let callback_result = (|| -> Result<()> {
+                for row in 0..frame.output_size.height as usize {
+                    compute_image_parallel_row(
+                        &frame.components,
+                        &planes,
+                        frame.output_size,
+                        self.determine_color_transform(),
+                        row,
+                        &mut line,
+                    )?;
+                    row_callback(row, &line)?;
+                }
+                Ok(())
+            })();
+            #[cfg(target_os = "vita")]
+            {
+                recycle_vita_component_planes(planes);
             }
-            Ok(Vec::new())
+            callback_result.map(|_| Vec::new())
         } else if let Some(output) = output {
             compute_image_into(
                 &frame.components,

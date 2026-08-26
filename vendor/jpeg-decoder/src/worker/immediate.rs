@@ -2,6 +2,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
 use crate::decoder::MAX_COMPONENTS;
+#[cfg(target_os = "vita")]
+use crate::decoder::take_vita_component_plane;
 use crate::error::Result;
 use crate::idct::dequantize_and_idct_block;
 use crate::alloc::sync::Arc;
@@ -31,7 +33,18 @@ impl ImmediateWorker {
         assert!(self.results[data.index].is_empty());
 
         self.offsets[data.index] = 0;
-        self.results[data.index].resize(data.component.block_size.width as usize * data.component.block_size.height as usize * data.component.dct_scale * data.component.dct_scale, 0u8);
+        let len = data.component.block_size.width as usize
+            * data.component.block_size.height as usize
+            * data.component.dct_scale
+            * data.component.dct_scale;
+        #[cfg(target_os = "vita")]
+        {
+            self.results[data.index] = take_vita_component_plane(data.index, len);
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            self.results[data.index].resize(len, 0u8);
+        }
         self.components[data.index] = Some(data.component);
         self.quantization_tables[data.index] = Some(data.quantization_table);
     }
