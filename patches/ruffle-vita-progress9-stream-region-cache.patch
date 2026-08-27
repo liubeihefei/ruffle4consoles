@@ -1,0 +1,87 @@
+diff --git a/core/src/character.rs b/core/src/character.rs
+index 82c4b1e00..b094730f4 100644
+--- a/core/src/character.rs
++++ b/core/src/character.rs
+@@ -9,7 +9,7 @@ use crate::display_object::{
+ use crate::font::Font;
+ use crate::tag_utils::SwfSlice;
+ #[cfg(target_os = "vita")]
+-use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
++use flate2::{bufread::ZlibDecoder, write::ZlibEncoder, Compression};
+ use gc_arena::barrier::unlock;
+ use gc_arena::lock::Lock;
+ use gc_arena::{Collect, Gc, Mutation};
+@@ -185,12 +185,43 @@ fn compress_vita_jpeg_region(rgba: &[u8]) -> Option<Vec<u8>> {
+ }
+ 
+ #[cfg(target_os = "vita")]
+-fn decompress_vita_jpeg_region(entry: &VitaJpegRegionCacheEntry) -> Option<Vec<u8>> {
+-    let mut rgba = Vec::with_capacity(entry.rgba_len);
+-    ZlibDecoder::new(entry.compressed_rgba.as_slice())
+-        .read_to_end(&mut rgba)
+-        .ok()?;
+-    (rgba.len() == entry.rgba_len).then_some(rgba)
++fn visit_vita_jpeg_region_stream<F>(
++    entry: &VitaJpegRegionCacheEntry,
++    region: PixelRegion,
++    visit: &mut F,
++) -> bool
++where
++    F: FnMut(u32, u32, [u8; 4]),
++{
++    const STREAM_BYTES: usize = 4 * 1024;
++
++    let width = region.width() as usize;
++    let expected_pixels = width * region.height() as usize;
++    if entry.rgba_len != expected_pixels * 4 {
++        return false;
++    }
++
++    let mut decoder = ZlibDecoder::new(entry.compressed_rgba.as_slice());
++    let mut block = [0u8; STREAM_BYTES];
++    let mut pixel_offset = 0usize;
++    while pixel_offset < expected_pixels {
++        let pixels = (expected_pixels - pixel_offset).min(STREAM_BYTES / 4);
++        let bytes = &mut block[..pixels * 4];
++        if decoder.read_exact(bytes).is_err() {
++            return false;
++        }
++        for rgba in bytes.chunks_exact(4) {
++            visit(
++                (pixel_offset % width) as u32,
++                (pixel_offset / width) as u32,
++                [rgba[0], rgba[1], rgba[2], rgba[3]],
++            );
++            pixel_offset += 1;
++        }
++    }
++
++    let mut trailing_byte = [0u8; 1];
++    decoder.read(&mut trailing_byte).ok() == Some(0)
+ }
+ 
+ #[cfg(target_os = "vita")]
+@@ -214,22 +245,7 @@ where
+             entry.matches(jpeg_data, alpha_data, width, height, region, flip_x)
+         }) {
+             let entry = cache.remove(index);
+-            if let Some(rgba) = decompress_vita_jpeg_region(&entry) {
+-                for y in 0..region.height() {
+-                    for x in 0..region.width() {
+-                        let offset = ((y * region.width() + x) * 4) as usize;
+-                        visit(
+-                            x,
+-                            y,
+-                            [
+-                                rgba[offset],
+-                                rgba[offset + 1],
+-                                rgba[offset + 2],
+-                                rgba[offset + 3],
+-                            ],
+-                        );
+-                    }
+-                }
++            if visit_vita_jpeg_region_stream(&entry, region, &mut visit) {
+                 let hits = VITA_JPEG_REGION_CACHE_HITS
+                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                     + 1;
