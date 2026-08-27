@@ -1,0 +1,13 @@
+diff --git a/core/src/character.rs b/core/src/character.rs
+index b094730f4..6116fe5c3 100644
+--- a/core/src/character.rs
++++ b/core/src/character.rs
+@@ -179,7 +179,7 @@ impl VitaJpegRegionCacheEntry {
+ 
+ #[cfg(target_os = "vita")]
+ fn compress_vita_jpeg_region(rgba: &[u8]) -> Option<Vec<u8>> {
+-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
++    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+     encoder.write_all(rgba).ok()?;
+     encoder.finish().ok()
+ }
