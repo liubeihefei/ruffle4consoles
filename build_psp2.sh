@@ -10,5 +10,8 @@
 export RUSTFLAGS="$RUSTFLAGS -C target-cpu=cortex-a9"
 cargo +nightly vita build elf --profile=vita --locked
 cp target/armv7-sony-vita-newlibeabihf/vita/ruffle4consoles \
-    target/armv7-sony-vita-newlibeabihf/vita/ruffle4consoles.debug.elf
+    /tmp/ruffle4consoles.debug.elf
 cargo +nightly vita build vpk --profile=vita --locked
+gzip -1 -c /tmp/ruffle4consoles.debug.elf > \
+    target/armv7-sony-vita-newlibeabihf/vita/ruffle4consoles.debug.elf.gz
+test -s target/armv7-sony-vita-newlibeabihf/vita/ruffle4consoles.debug.elf.gz

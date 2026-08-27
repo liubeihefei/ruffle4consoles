@@ -105,7 +105,8 @@ jobs:
             - uses: actions/upload-artifact@v7
               with:
                 name: vita-debug-elf
-                path: target/armv7-sony-vita-newlibeabihf/vita/ruffle4consoles.debug.elf
+                if-no-files-found: error
+                path: target/armv7-sony-vita-newlibeabihf/vita/ruffle4consoles.debug.elf.gz
 
     build-nx:
         name: Nintendo Switch
