@@ -1,0 +1,195 @@
+diff --git a/core/src/character.rs b/core/src/character.rs
+index 902d9759d..82c4b1e00 100644
+--- a/core/src/character.rs
++++ b/core/src/character.rs
+@@ -8,6 +8,8 @@ use crate::display_object::{
+ };
+ use crate::font::Font;
+ use crate::tag_utils::SwfSlice;
++#[cfg(target_os = "vita")]
++use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
+ use gc_arena::barrier::unlock;
+ use gc_arena::lock::Lock;
+ use gc_arena::{Collect, Gc, Mutation};
+@@ -16,6 +18,8 @@ use ruffle_render::bitmap::{Bitmap as RenderBitmap, BitmapHandle, BitmapSize};
+ #[cfg(target_os = "vita")]
+ use ruffle_render::bitmap::PixelRegion;
+ use ruffle_render::error::Error as RenderError;
++#[cfg(target_os = "vita")]
++use std::io::{Read, Write};
+ use swf::{BitmapFormat, CharacterId, DefineBitsLossless};
+ 
+ #[derive(Copy, Clone, Collect, Debug)]
+@@ -144,7 +148,8 @@ struct VitaJpegRegionCacheEntry {
+     x_max: u32,
+     y_max: u32,
+     flip_x: bool,
+-    rgba: Vec<u8>,
++    compressed_rgba: Vec<u8>,
++    rgba_len: usize,
+ }
+ 
+ #[cfg(target_os = "vita")]
+@@ -172,6 +177,22 @@ impl VitaJpegRegionCacheEntry {
+     }
+ }
+ 
++#[cfg(target_os = "vita")]
++fn compress_vita_jpeg_region(rgba: &[u8]) -> Option<Vec<u8>> {
++    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
++    encoder.write_all(rgba).ok()?;
++    encoder.finish().ok()
++}
++
++#[cfg(target_os = "vita")]
++fn decompress_vita_jpeg_region(entry: &VitaJpegRegionCacheEntry) -> Option<Vec<u8>> {
++    let mut rgba = Vec::with_capacity(entry.rgba_len);
++    ZlibDecoder::new(entry.compressed_rgba.as_slice())
++        .read_to_end(&mut rgba)
++        .ok()?;
++    (rgba.len() == entry.rgba_len).then_some(rgba)
++}
++
+ #[cfg(target_os = "vita")]
+ fn visit_vita_jpeg_region_cached<F>(
+     jpeg_data: &[u8],
+@@ -193,39 +214,49 @@ where
+             entry.matches(jpeg_data, alpha_data, width, height, region, flip_x)
+         }) {
+             let entry = cache.remove(index);
+-            for y in 0..region.height() {
+-                for x in 0..region.width() {
+-                    let offset = ((y * region.width() + x) * 4) as usize;
+-                    visit(
+-                        x,
+-                        y,
+-                        [
+-                            entry.rgba[offset],
+-                            entry.rgba[offset + 1],
+-                            entry.rgba[offset + 2],
+-                            entry.rgba[offset + 3],
+-                        ],
++            if let Some(rgba) = decompress_vita_jpeg_region(&entry) {
++                for y in 0..region.height() {
++                    for x in 0..region.width() {
++                        let offset = ((y * region.width() + x) * 4) as usize;
++                        visit(
++                            x,
++                            y,
++                            [
++                                rgba[offset],
++                                rgba[offset + 1],
++                                rgba[offset + 2],
++                                rgba[offset + 3],
++                            ],
++                        );
++                    }
++                }
++                let hits = VITA_JPEG_REGION_CACHE_HITS
++                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
++                    + 1;
++                if hits <= 4 || hits % 128 == 0 {
++                    println!(
++                        "VITA_JPEG_REGION_CACHE_HIT hits={} region={},{},{}x{} flip_x={} retained_bytes={} raw_bytes={}",
++                        hits,
++                        region.x_min,
++                        region.y_min,
++                        region.width(),
++                        region.height(),
++                        flip_x,
++                        entry.compressed_rgba.capacity(),
++                        entry.rgba_len,
+                     );
+                 }
++                cache.push(entry);
++                return Ok(());
+             }
+-            let bytes = entry.rgba.capacity();
+-            cache.push(entry);
+-            let hits = VITA_JPEG_REGION_CACHE_HITS
+-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+-                + 1;
+-            if hits <= 4 || hits % 128 == 0 {
+-                println!(
+-                    "VITA_JPEG_REGION_CACHE_HIT hits={} region={},{},{}x{} flip_x={} bytes={}",
+-                    hits,
+-                    region.x_min,
+-                    region.y_min,
+-                    region.width(),
+-                    region.height(),
+-                    flip_x,
+-                    bytes,
+-                );
+-            }
+-            return Ok(());
++            println!(
++                "VITA_JPEG_REGION_CACHE_DROP_INVALID region={},{},{}x{} flip_x={}",
++                region.x_min,
++                region.y_min,
++                region.width(),
++                region.height(),
++                flip_x,
++            );
+         }
+     }
+ 
+@@ -247,6 +278,14 @@ where
+         && rgba.len() == expected_bytes
+         && rgba.capacity() <= VITA_JPEG_REGION_CACHE_MAX_BYTES
+     {
++        let raw_bytes = rgba.capacity();
++        let compressed_rgba = compress_vita_jpeg_region(&rgba);
++        let Some(compressed_rgba) = compressed_rgba.filter(|compressed| {
++            compressed.capacity() < raw_bytes
++                && compressed.capacity() <= VITA_JPEG_REGION_CACHE_MAX_BYTES
++        }) else {
++            return result;
++        };
+         let mut cache = VITA_JPEG_REGION_CACHE
+             .lock()
+             .unwrap_or_else(|poisoned| poisoned.into_inner());
+@@ -254,16 +293,16 @@ where
+             entry.matches(jpeg_data, alpha_data, width, height, region, flip_x)
+         }) {
+             let mut retained_bytes = cache.iter().fold(0usize, |total, entry| {
+-                total.saturating_add(entry.rgba.capacity())
++                total.saturating_add(entry.compressed_rgba.capacity())
+             });
+             while !cache.is_empty()
+-                && retained_bytes.saturating_add(rgba.capacity())
++                && retained_bytes.saturating_add(compressed_rgba.capacity())
+                     > VITA_JPEG_REGION_CACHE_MAX_BYTES
+             {
+                 let evicted = cache.remove(0);
+-                retained_bytes = retained_bytes.saturating_sub(evicted.rgba.capacity());
++                retained_bytes = retained_bytes.saturating_sub(evicted.compressed_rgba.capacity());
+             }
+-            let bytes = rgba.capacity();
++            let retained_bytes_for_entry = compressed_rgba.capacity();
+             cache.push(VitaJpegRegionCacheEntry {
+                 jpeg_ptr: jpeg_data.as_ptr() as usize,
+                 jpeg_len: jpeg_data.len(),
+@@ -276,18 +315,19 @@ where
+                 x_max: region.x_max,
+                 y_max: region.y_max,
+                 flip_x,
+-                rgba,
++                compressed_rgba,
++                rgba_len: expected_bytes,
+             });
+             println!(
+-                "VITA_JPEG_REGION_CACHE_STORE entries={} retained_bytes={} region={},{},{}x{} flip_x={} bytes={}",
++                "VITA_JPEG_REGION_CACHE_STORE entries={} retained_bytes={} region={},{},{}x{} flip_x={} raw_bytes={}",
+                 cache.len(),
+-                retained_bytes.saturating_add(bytes),
++                retained_bytes.saturating_add(retained_bytes_for_entry),
+                 region.x_min,
+                 region.y_min,
+                 region.width(),
+                 region.height(),
+                 flip_x,
+-                bytes,
++                raw_bytes,
+             );
+         }
+     }
