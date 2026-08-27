@@ -1,3 +1,5 @@
+set -e
+
 # Wrapped Allocators seem to cause issues with touch and don't seem to help with the OOMs 
 #export RUSTFLAGS="$RUSTFLAGS -Clink-arg=-Wl,--wrap=malloc"
 #export RUSTFLAGS="$RUSTFLAGS -Clink-arg=-Wl,--wrap=free"
@@ -9,7 +11,7 @@
 #export RUSTFLAGS="$RUSTFLAGS -Clink-arg=-Wl,-q"
 export RUSTFLAGS="$RUSTFLAGS -C target-cpu=cortex-a9"
 cargo +nightly vita build elf --profile=vita --locked
-cp target/armv7-sony-vita-newlibeabihf/vita/ruffle4consoles \
+cp target/armv7-sony-vita-newlibeabihf/vita/ruffle4consoles.elf \
     /tmp/ruffle4consoles.debug.elf
 cargo +nightly vita build vpk --profile=vita --locked
 gzip -1 -c /tmp/ruffle4consoles.debug.elf > \
