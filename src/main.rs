@@ -9,6 +9,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "vita")]
+use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(target_os = "vita")]
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use anyhow::anyhow;
 
 use ron::de::from_reader;
@@ -39,6 +44,122 @@ use core::ffi::c_void;
 
 #[cfg(target_os = "vita")]
 static VGL_MODE_POSTPONED: u32 = 2;
+
+#[cfg(target_os = "vita")]
+struct VitaAllocationProbe;
+
+#[cfg(target_os = "vita")]
+static VITA_ALLOCATION_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_os = "vita")]
+const VITA_ALLOCATION_PROBE_MIN: usize = 32 * 1024;
+#[cfg(target_os = "vita")]
+const VITA_ALLOCATION_PROBE_MAX: usize = 64 * 1024;
+
+#[cfg(target_os = "vita")]
+#[inline(always)]
+fn vita_link_register() -> u32 {
+    let link_register: u32;
+    unsafe {
+        core::arch::asm!(
+            "mov {link_register}, lr",
+            link_register = out(reg) link_register,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    link_register
+}
+
+#[cfg(target_os = "vita")]
+#[inline]
+fn log_vita_allocation(op: *const i8, size: usize, align: usize, link_register: u32, failed: bool) {
+    let sequence = VITA_ALLOCATION_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
+    if !failed && sequence > 8 && sequence % 128 != 0 {
+        return;
+    }
+
+    let result = if failed {
+        c"FAIL".as_ptr()
+    } else {
+        c"OK".as_ptr()
+    };
+    unsafe {
+        vitasdk_sys::sceClibPrintf(
+            c"VITA_ALLOC_PROBE seq=%u op=%s size=%u align=%u lr=0x%08X result=%s\n".as_ptr(),
+            sequence,
+            op,
+            size as u32,
+            align as u32,
+            link_register,
+            result,
+        );
+    }
+}
+
+#[cfg(target_os = "vita")]
+#[inline]
+fn should_probe_vita_allocation(size: usize) -> bool {
+    (VITA_ALLOCATION_PROBE_MIN..=VITA_ALLOCATION_PROBE_MAX).contains(&size)
+}
+
+#[cfg(target_os = "vita")]
+unsafe impl GlobalAlloc for VitaAllocationProbe {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let probe = should_probe_vita_allocation(layout.size());
+        let link_register = if probe { vita_link_register() } else { 0 };
+        let allocation = unsafe { System.alloc(layout) };
+        if probe {
+            log_vita_allocation(
+                c"alloc".as_ptr(),
+                layout.size(),
+                layout.align(),
+                link_register,
+                allocation.is_null(),
+            );
+        }
+        allocation
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let probe = should_probe_vita_allocation(layout.size());
+        let link_register = if probe { vita_link_register() } else { 0 };
+        let allocation = unsafe { System.alloc_zeroed(layout) };
+        if probe {
+            log_vita_allocation(
+                c"zeroed".as_ptr(),
+                layout.size(),
+                layout.align(),
+                link_register,
+                allocation.is_null(),
+            );
+        }
+        allocation
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) };
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let probe = should_probe_vita_allocation(new_size);
+        let link_register = if probe { vita_link_register() } else { 0 };
+        let allocation = unsafe { System.realloc(ptr, layout, new_size) };
+        if probe {
+            log_vita_allocation(
+                c"realloc".as_ptr(),
+                new_size,
+                layout.align(),
+                link_register,
+                allocation.is_null(),
+            );
+        }
+        allocation
+    }
+}
+
+#[cfg(target_os = "vita")]
+#[global_allocator]
+static VITA_ALLOCATION_PROBE: VitaAllocationProbe = VitaAllocationProbe;
 
 #[cfg(target_os = "vita")]
 #[link(name = "SDL2", kind = "static")]
