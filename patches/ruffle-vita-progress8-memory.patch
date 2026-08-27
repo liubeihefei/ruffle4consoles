@@ -1,8 +1,8 @@
 diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
-index 7bfe6bcee..59d52935f 100644
+index 7bfe6bcee..a926f5746 100644
 --- a/core/src/bitmap/bitmap_data.rs
 +++ b/core/src/bitmap/bitmap_data.rs
-@@ -75,6 +75,55 @@ const BITMAP_LOG_THRESHOLD_BYTES: usize = 48 * 1024;
+@@ -75,6 +75,66 @@ const BITMAP_LOG_THRESHOLD_BYTES: usize = 48 * 1024;
  #[cfg(target_os = "vita")]
  const BITMAP_CPU_DROP_MIN_BYTES: usize = 4 * 1024;
  
@@ -11,6 +11,17 @@ index 7bfe6bcee..59d52935f 100644
 +
 +#[cfg(target_os = "vita")]
 +const BITMAP_CPU_POOL_MAX_BYTES: usize = 256 * 1024;
++
++#[cfg(target_os = "vita")]
++const BITMAP_PROBE_MIN_BYTES: usize = 4 * 1024;
++
++#[cfg(target_os = "vita")]
++const BITMAP_PROBE_MAX_BYTES: usize = 64 * 1024;
++
++#[cfg(target_os = "vita")]
++fn should_probe_bitmap_allocation(bytes: usize) -> bool {
++    (BITMAP_PROBE_MIN_BYTES..=BITMAP_PROBE_MAX_BYTES).contains(&bytes)
++}
 +
 +#[cfg(target_os = "vita")]
 +static BITMAP_CPU_BUFFER_POOL: std::sync::Mutex<Option<Vec<Color>>> =
@@ -58,7 +69,7 @@ index 7bfe6bcee..59d52935f 100644
  impl Color {
      #[must_use]
      pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
-@@ -328,6 +377,50 @@ impl<'gc> BitmapData<'gc> {
+@@ -328,6 +388,50 @@ impl<'gc> BitmapData<'gc> {
          self.0.prepare_gpu_draw(mc)
      }
  
@@ -109,7 +120,7 @@ index 7bfe6bcee..59d52935f 100644
      pub fn read_area(
          &self,
          read_area: PixelRegion,
-@@ -436,6 +529,10 @@ pub struct BitmapRawData<'gc> {
+@@ -436,6 +540,10 @@ pub struct BitmapRawData<'gc> {
      #[collect(require_static)]
      compressed: Option<CompressedBitmap>,
  
@@ -120,7 +131,7 @@ index 7bfe6bcee..59d52935f 100644
      /// The bitmap handle for this data.
      ///
      /// This is lazily initialized; a value of `None` indicates that
-@@ -544,6 +641,8 @@ mod wrapper {
+@@ -544,6 +652,8 @@ mod wrapper {
                      discarded_cpu_fill: None,
                      #[cfg(target_os = "vita")]
                      compressed: None,
@@ -129,7 +140,7 @@ index 7bfe6bcee..59d52935f 100644
                      bitmap_handle: None,
                      avm2_object: None,
                      display_objects: vec![],
-@@ -558,6 +657,49 @@ mod wrapper {
+@@ -558,6 +668,49 @@ mod wrapper {
          /// Clones the underlying data, producing a new `BitmapData`
          /// that has no GPU texture or associated display objects
          pub fn clone_data(&self, renderer: &mut dyn RenderBackend) -> BitmapRawData<'gc> {
@@ -179,7 +190,33 @@ index 7bfe6bcee..59d52935f 100644
              // Sync from the GPU to CPU, since our new BitmapData starts out
              // with no GPU texture
              let data = self.sync(renderer).borrow();
-@@ -605,6 +747,8 @@ mod wrapper {
+@@ -579,7 +732,25 @@ mod wrapper {
+                 );
+             }
+ 
++            #[cfg(target_os = "vita")]
++            {
++                if super::should_probe_bitmap_allocation(pixel_bytes) {
++                    println!(
++                        "VITA_BITMAP_PROBE_BEGIN kind=clone id={} size={}x{} bytes={}",
++                        debug_id, data.width, data.height, pixel_bytes,
++                    );
++                }
++            }
+             let pixels = data.pixels.clone();
++            #[cfg(target_os = "vita")]
++            {
++                if super::should_probe_bitmap_allocation(pixel_bytes) {
++                    println!(
++                        "VITA_BITMAP_PROBE_OK kind=clone id={} size={}x{} bytes={}",
++                        debug_id, data.width, data.height, pixel_bytes,
++                    );
++                }
++            }
+ 
+             #[cfg(target_os = "vita")]
+             if pixel_bytes >= super::BITMAP_LOG_THRESHOLD_BYTES {
+@@ -605,6 +776,8 @@ mod wrapper {
                  discarded_cpu_fill: None,
                  #[cfg(target_os = "vita")]
                  compressed: None,
@@ -188,7 +225,7 @@ index 7bfe6bcee..59d52935f 100644
                  bitmap_handle: None,
                  avm2_object: None,
                  display_objects: vec![],
-@@ -626,12 +770,12 @@ mod wrapper {
+@@ -626,12 +799,12 @@ mod wrapper {
                  .unlock()
                  .borrow_mut();
              #[cfg(target_os = "vita")]
@@ -205,7 +242,7 @@ index 7bfe6bcee..59d52935f 100644
                      let mut sync_handle = Some(sync_handle);
                      let stride = write.width() * 4;
                      let resolved_into_existing = renderer
-@@ -706,7 +850,11 @@ mod wrapper {
+@@ -706,7 +879,11 @@ mod wrapper {
          ) -> (GcRefLock<'gc, BitmapRawData<'gc>>, Option<PixelRegion>) {
              let result = self.prepare_gpu_draw(mc);
              #[cfg(target_os = "vita")]
@@ -218,7 +255,7 @@ index 7bfe6bcee..59d52935f 100644
              result
          }
  
-@@ -729,6 +877,113 @@ mod wrapper {
+@@ -729,6 +906,113 @@ mod wrapper {
              (self.0, dirty_rect)
          }
  
@@ -332,7 +369,7 @@ index 7bfe6bcee..59d52935f 100644
          /// Provides read access to the BitmapData pixels.
          /// Only the provided region is guaranteed to be up-to-date.
          /// It is an error to access any other pixels outside of that region.
-@@ -904,7 +1159,9 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -904,7 +1188,9 @@ impl<'gc> BitmapRawData<'gc> {
          #[cfg(target_os = "vita")]
          let pixel_bytes = width as usize * height as usize * std::mem::size_of::<Color>();
          #[cfg(target_os = "vita")]
@@ -343,7 +380,7 @@ index 7bfe6bcee..59d52935f 100644
              tracing::info!(
                  target: "ruffle_core::bitmap",
                  "VITA_BITMAP_ALLOC_BEGIN id={} kind=fill size={}x{} bytes={} transparent={}",
-@@ -916,13 +1173,28 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -916,13 +1202,46 @@ impl<'gc> BitmapRawData<'gc> {
              );
          }
  
@@ -353,11 +390,29 @@ index 7bfe6bcee..59d52935f 100644
 -        ];
 +        let fill = Color::bgra_u32(fill_color).to_premultiplied_alpha(transparency);
 +        #[cfg(target_os = "vita")]
++        {
++            if !use_sparse && should_probe_bitmap_allocation(pixel_bytes) {
++                println!(
++                    "VITA_BITMAP_PROBE_BEGIN kind=fill id={} size={}x{} bytes={}",
++                    debug_id, width, height, pixel_bytes,
++                );
++            }
++        }
++        #[cfg(target_os = "vita")]
 +        let pixels = if use_sparse {
 +            Vec::new()
 +        } else {
 +            vec![fill; width as usize * height as usize]
 +        };
++        #[cfg(target_os = "vita")]
++        {
++            if !use_sparse && should_probe_bitmap_allocation(pixel_bytes) {
++                println!(
++                    "VITA_BITMAP_PROBE_OK kind=fill id={} size={}x{} bytes={}",
++                    debug_id, width, height, pixel_bytes,
++                );
++            }
++        }
 +        #[cfg(not(target_os = "vita"))]
 +        let pixels = vec![fill; width as usize * height as usize];
  
@@ -377,7 +432,7 @@ index 7bfe6bcee..59d52935f 100644
              tracing::info!(
                  target: "ruffle_core::bitmap",
                  "VITA_BITMAP_ALLOC_OK id={} kind=fill size={}x{} bytes={}",
-@@ -942,9 +1214,11 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -942,9 +1261,11 @@ impl<'gc> BitmapRawData<'gc> {
              #[cfg(target_os = "vita")]
              debug_id,
              #[cfg(target_os = "vita")]
@@ -390,7 +445,7 @@ index 7bfe6bcee..59d52935f 100644
              bitmap_handle: None,
              avm2_object: None,
              display_objects: vec![],
-@@ -988,6 +1262,8 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -988,6 +1309,8 @@ impl<'gc> BitmapRawData<'gc> {
              discarded_cpu_fill: None,
              #[cfg(target_os = "vita")]
              compressed: None,
@@ -399,7 +454,7 @@ index 7bfe6bcee..59d52935f 100644
              bitmap_handle: None,
              avm2_object: None,
              disposed: false,
-@@ -1006,6 +1282,15 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1006,6 +1329,15 @@ impl<'gc> BitmapRawData<'gc> {
          compressed: CompressedBitmap,
      ) -> Self {
          let debug_id = NEXT_BITMAP_DEBUG_ID.fetch_add(1, Ordering::Relaxed);
@@ -415,7 +470,7 @@ index 7bfe6bcee..59d52935f 100644
          Self {
              pixels: Vec::new(),
              width,
-@@ -1014,6 +1299,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1014,6 +1346,7 @@ impl<'gc> BitmapRawData<'gc> {
              debug_id,
              discarded_cpu_fill: None,
              compressed: Some(compressed),
@@ -423,7 +478,7 @@ index 7bfe6bcee..59d52935f 100644
              bitmap_handle: None,
              avm2_object: None,
              disposed: false,
-@@ -1030,25 +1316,35 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1030,25 +1363,35 @@ impl<'gc> BitmapRawData<'gc> {
  
      pub fn dispose(&mut self) {
          #[cfg(target_os = "vita")]
@@ -464,9 +519,17 @@ index 7bfe6bcee..59d52935f 100644
          }
          self.bitmap_handle = None;
          // There's no longer a handle to update
-@@ -1062,8 +1358,12 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1061,12 +1404,29 @@ impl<'gc> BitmapRawData<'gc> {
+         let Some(compressed) = self.compressed.take() else {
              return;
          };
++        let pixel_bytes = self.logical_pixel_bytes();
++        if should_probe_bitmap_allocation(pixel_bytes) {
++            println!(
++                "VITA_BITMAP_PROBE_BEGIN kind=compressed_materialize id={} size={}x{} bytes={}",
++                self.debug_id, self.width, self.height, pixel_bytes,
++            );
++        }
          let bitmap = compressed
 -            .decode()
 +            .decode_region(
@@ -478,7 +541,16 @@ index 7bfe6bcee..59d52935f 100644
          debug_assert_eq!(bitmap.width(), self.width);
          debug_assert_eq!(bitmap.height(), self.height);
          self.pixels = bitmap.as_colors().map(Color::from).collect();
-@@ -1077,6 +1377,79 @@ impl<'gc> BitmapRawData<'gc> {
++        if should_probe_bitmap_allocation(pixel_bytes) {
++            println!(
++                "VITA_BITMAP_PROBE_OK kind=compressed_materialize id={} size={}x{} bytes={}",
++                self.debug_id, self.width, self.height, pixel_bytes,
++            );
++        }
+         tracing::info!(
+             target: "ruffle_core::bitmap",
+             "VITA_BITMAP_CPU_MATERIALIZE id={} size={}x{} bytes={}",
+@@ -1077,6 +1437,79 @@ impl<'gc> BitmapRawData<'gc> {
          );
      }
  
@@ -558,7 +630,7 @@ index 7bfe6bcee..59d52935f 100644
      pub fn try_bitmap_handle(
          &mut self,
          renderer: &mut dyn RenderBackend,
-@@ -1086,14 +1459,26 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1086,14 +1519,26 @@ impl<'gc> BitmapRawData<'gc> {
          }
  
          #[cfg(target_os = "vita")]
@@ -589,7 +661,7 @@ index 7bfe6bcee..59d52935f 100644
          let bitmap = Bitmap::new(
              self.width(),
              self.height(),
-@@ -1247,13 +1632,15 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1247,13 +1692,31 @@ impl<'gc> BitmapRawData<'gc> {
          let pixel_bytes = self.width as usize * self.height as usize * std::mem::size_of::<Color>();
          tracing::info!(
              target: "ruffle_core::bitmap",
@@ -602,12 +674,28 @@ index 7bfe6bcee..59d52935f 100644
          );
 -        self.pixels = vec![fill; self.width as usize * self.height as usize];
 +        let pixel_count = self.width as usize * self.height as usize;
-+        self.pixels = take_cpu_buffer(pixel_count, fill)
-+            .unwrap_or_else(|| vec![fill; pixel_count]);
++        let pooled = take_cpu_buffer(pixel_count, fill);
++        if should_probe_bitmap_allocation(pixel_bytes) {
++            println!(
++                "VITA_BITMAP_PROBE_BEGIN kind=uniform_restore id={} size={}x{} bytes={} pooled={}",
++                self.debug_id,
++                self.width,
++                self.height,
++                pixel_bytes,
++                pooled.is_some(),
++            );
++        }
++        self.pixels = pooled.unwrap_or_else(|| vec![fill; pixel_count]);
++        if should_probe_bitmap_allocation(pixel_bytes) {
++            println!(
++                "VITA_BITMAP_PROBE_OK kind=uniform_restore id={} size={}x{} bytes={}",
++                self.debug_id, self.width, self.height, pixel_bytes,
++            );
++        }
          tracing::info!(
              target: "ruffle_core::bitmap",
              "VITA_BITMAP_CPU_RESTORE_OK id={} size={}x{} bytes={}",
-@@ -1267,6 +1654,22 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -1267,6 +1730,22 @@ impl<'gc> BitmapRawData<'gc> {
      // Updates the data stored with our `BitmapHandle` if this `BitmapRawData`
      // is dirty
      pub fn update_dirty_texture(&mut self, renderer: &mut dyn RenderBackend) {
